@@ -1,0 +1,444 @@
+// === api-key-manager.js ===
+/**
+ * @module api-key-manager
+ * @description AES-GCM 256-bit encrypted API key storage for third-party
+ *   providers (captcha solvers, data enrichment, notifications).
+ *
+ *   Design decision: The AES-GCM session key is derived once per service-worker
+ *   activation via crypto.getRandomValues(). It lives ONLY in module scope —
+ *   never in any storage. Key ciphertexts go to chrome.storage.session, which
+ *   Chrome auto-purges on browser close. This means keys survive SW restarts
+ *   within a session but not across browser sessions.
+ *
+ *   Validation calls check the minimum required endpoint for each provider.
+ *   On network failure, returns { valid: null, error: 'network' } to distinguish
+ *   from an actually invalid key.
+ *
+ * @dependencies logger
+ */
+
+import { logger } from '../utils/logger.js';
+
+const MODULE = 'api-key-manager';
+
+// Storage keys
+const SESSION_KEY_KEYS = 'fs_api_keys_enc';   // session: ciphertext map
+const SESSION_KEY_SK   = 'fs_session_key';     // NOT in storage — module scope only
+
+// ── AES-GCM session key (module scope only, never persisted) ──────────────────
+let _sessionCryptoKey = null;  // CryptoKey object
+
+/**
+ * Initialize (or re-initialize) the AES-GCM session key.
+ * Call this once per service-worker activation.
+ */
+export async function initSessionKey() {
+  _sessionCryptoKey = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    false,           // NOT extractable — prevents accidental export
+    ['encrypt', 'decrypt']
+  );
+  logger.info(MODULE, 'session-key-init', {});
+}
+
+/**
+ * Ensure we have a session key; generate if missing (SW restart recovery).
+ */
+async function _ensureKey() {
+  if (!_sessionCryptoKey) await initSessionKey();
+}
+
+// ── Encryption helpers ────────────────────────────────────────────────────────
+
+/**
+ * Encrypt a plaintext string with AES-GCM.
+ * Returns base64url-encoded { iv, ciphertext } JSON.
+ * @param {string} plaintext
+ * @returns {Promise<string>}
+ */
+async function _encrypt(plaintext) {
+  await _ensureKey();
+  const iv  = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    _sessionCryptoKey,
+    enc.encode(plaintext)
+  );
+  const b64 = v => btoa(String.fromCharCode(...new Uint8Array(v)));
+  return JSON.stringify({ iv: b64(iv), ct: b64(buf) });
+}
+
+/**
+ * Decrypt a previously encrypted blob.
+ * @param {string} blob - JSON string from _encrypt()
+ * @returns {Promise<string>}
+ */
+async function _decrypt(blob) {
+  await _ensureKey();
+  const { iv: ivB64, ct: ctB64 } = JSON.parse(blob);
+  const dec  = v => Uint8Array.from(atob(v), c => c.charCodeAt(0));
+  const buf  = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: dec(ivB64) },
+    _sessionCryptoKey,
+    dec(ctB64)
+  );
+  return new TextDecoder().decode(buf);
+}
+
+// ── Key storage ───────────────────────────────────────────────────────────────
+
+/**
+ * Load encrypted key map from session storage.
+ * @returns {Promise<Map<string, string>>} provider → encrypted blob
+ */
+async function _loadEncMap() {
+  const items = await chrome.storage.session.get([SESSION_KEY_KEYS]);
+  const raw   = items[SESSION_KEY_KEYS] ?? {};
+  return new Map(Object.entries(raw));
+}
+
+/**
+ * Save encrypted key map to session storage.
+ * @param {Map<string, string>} map
+ */
+async function _saveEncMap(map) {
+  await chrome.storage.session.set({ [SESSION_KEY_KEYS]: Object.fromEntries(map) });
+}
+
+/**
+ * Store an API key for a provider (encrypts before storing).
+ * @param {string} provider - e.g. '2captcha', 'openai'
+ * @param {string} keyValue
+ */
+export async function setApiKey(provider, keyValue) {
+  if (!provider || !keyValue) throw new Error('provider and keyValue are required');
+  const blob = await _encrypt(keyValue);
+  const map  = await _loadEncMap();
+  map.set(provider, blob);
+  await _saveEncMap(map);
+  logger.info(MODULE, 'key-stored', { provider });
+  // NEVER log keyValue
+}
+
+/**
+ * Retrieve and decrypt an API key.
+ * @param {string} provider
+ * @returns {Promise<string|null>}
+ */
+export async function getApiKey(provider) {
+  const map  = await _loadEncMap();
+  const blob = map.get(provider);
+  if (!blob) return null;
+  try {
+    return await _decrypt(blob);
+  } catch (err) {
+    logger.error(MODULE, 'key-decrypt-fail', { provider, error: err.message });
+    return null;
+  }
+}
+
+/**
+ * Remove an API key.
+ * @param {string} provider
+ */
+export async function removeApiKey(provider) {
+  const map = await _loadEncMap();
+  map.delete(provider);
+  await _saveEncMap(map);
+  logger.info(MODULE, 'key-removed', { provider });
+}
+
+/**
+ * List stored providers (names only — no key values).
+ * @returns {Promise<string[]>}
+ */
+export async function listProviders() {
+  const map = await _loadEncMap();
+  return [...map.keys()];
+}
+
+/**
+ * Check if a key is stored for a provider.
+ * @param {string} provider
+ * @returns {Promise<boolean>}
+ */
+export async function hasApiKey(provider) {
+  const map = await _loadEncMap();
+  return map.has(provider);
+}
+
+// ── Key validation ────────────────────────────────────────────────────────────
+
+/**
+ * @typedef {Object} ValidationResult
+ * @property {boolean|null} valid   - true=valid, false=invalid, null=network error
+ * @property {number}  [balance]
+ * @property {number}  [quotaRemaining]
+ * @property {string}  [error]
+ */
+
+/**
+ * Validate the stored key for a given provider.
+ * @param {string} provider
+ * @returns {Promise<ValidationResult>}
+ */
+export async function validateApiKey(provider) {
+  const key = await getApiKey(provider);
+  if (!key) return { valid: false, error: 'No key stored' };
+
+  const validators = {
+    '2captcha':    () => _validate2captcha(key),
+    'anticaptcha': () => _validateAnticaptcha(key),
+    'capsolver':   () => _validateCapsolver(key),
+    'hunter':      () => _validateHunter(key),
+    'openai':      () => _validateOpenAI(key),
+  };
+
+  const fn = validators[provider.toLowerCase()];
+  if (!fn) {
+    logger.warn(MODULE, 'no-validator', { provider });
+    return { valid: null, error: 'No validator for this provider' };
+  }
+
+  try {
+    const result = await fn();
+    logger.info(MODULE, 'key-validated', { provider, valid: result.valid });
+    return result;
+  } catch (err) {
+    if (err.name === 'AbortError' || err.message?.includes('Failed to fetch')) {
+      logger.warn(MODULE, 'validation-network-fail', { provider });
+      return { valid: null, error: 'network' };
+    }
+    logger.error(MODULE, 'validation-error', { provider, error: err.message });
+    return { valid: false, error: err.message };
+  }
+}
+
+async function _validate2captcha(key) {
+  const url = `https://2captcha.com/res.php?action=getbalance&key=${encodeURIComponent(key)}`;
+  const res  = await _timedFetch(url);
+  const text = await res.text();
+  const bal  = parseFloat(text);
+  if (text.startsWith('ERROR_')) return { valid: false, error: text };
+  return { valid: !isNaN(bal), balance: bal };
+}
+
+async function _validateAnticaptcha(key) {
+  const res  = await _timedFetch('https://api.anti-captcha.com/getBalance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key }),
+  });
+  const json = await res.json();
+  if (json.errorId !== 0) return { valid: false, error: json.errorDescription };
+  return { valid: true, balance: json.balance };
+}
+
+async function _validateCapsolver(key) {
+  const res  = await _timedFetch('https://api.capsolver.com/getBalance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key }),
+  });
+  const json = await res.json();
+  if (json.errorId) return { valid: false, error: json.errorDescription };
+  return { valid: true, balance: json.balance };
+}
+
+async function _validateHunter(key) {
+  const url  = `https://api.hunter.io/v2/account?api_key=${encodeURIComponent(key)}`;
+  const res  = await _timedFetch(url);
+  const json = await res.json();
+  if (json.errors) return { valid: false, error: json.errors[0]?.details };
+  const searches = json.data?.requests?.searches;
+  return {
+    valid: true,
+    quotaRemaining: searches ? (searches.available - searches.used) : undefined,
+  };
+}
+
+async function _validateOpenAI(key) {
+  const res  = await _timedFetch('https://api.openai.com/v1/models', {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  if (res.status === 401) return { valid: false, error: 'Invalid API key' };
+  if (!res.ok) return { valid: false, error: `HTTP ${res.status}` };
+  return { valid: true };
+}
+
+/**
+ * Fetch with a 10-second timeout.
+ */
+async function _timedFetch(url, opts = {}) {
+  const ctrl = new AbortController();
+  const t    = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ── Captcha ethics gate ───────────────────────────────────────────────────────
+
+/**
+ * Check all captcha ethics gates before dispatch.
+ * @param {{
+ *   authorized: boolean,
+ *   robotsAllows: boolean,
+ *   estimatedSolvesPerHr: number,
+ *   recipeEnabled: boolean
+ * }} flags
+ * @returns {{ allowed: boolean, reason?: string }}
+ */
+export function checkCaptchaGates(flags) {
+  if (!flags.recipeEnabled) return { allowed: false, reason: 'Recipe captchaEnabled=false' };
+  if (!flags.authorized)    return { allowed: false, reason: 'User has not authorized automation for this site' };
+  if (!flags.robotsAllows)  return { allowed: false, reason: 'robots.txt disallows this path' };
+  if (flags.estimatedSolvesPerHr > 50) {
+    return { allowed: false, reason: `Estimated solves/hr (${flags.estimatedSolvesPerHr}) exceeds limit of 50` };
+  }
+  return { allowed: true };
+}
+
+// ── Captcha dispatcher ────────────────────────────────────────────────────────
+
+/**
+ * Dispatch a captcha solve request to the configured provider.
+ * Provider is selected by priority: 2captcha → anticaptcha → capsolver.
+ * Returns the solution token, or throws if blocked by ethics gate.
+ *
+ * @param {{
+ *   type: 'recaptcha-v2'|'recaptcha-v3'|'hcaptcha'|'turnstile'|'image',
+ *   sitekey?: string,
+ *   pageUrl: string,
+ *   imageBase64?: string,
+ *   gates: object
+ * }} params
+ * @returns {Promise<string>} solution token
+ */
+export async function solveCaptcha(params) {
+  // Ethics gate enforced here, not just in UI
+  const gateResult = checkCaptchaGates(params.gates ?? {});
+  if (!gateResult.allowed) {
+    logger.error(MODULE, 'captcha-gate-block', { reason: gateResult.reason });
+    throw Object.assign(new Error(`CaptchaGateBlocked: ${gateResult.reason}`), { code: 'ETHICS_BLOCK' });
+  }
+
+  // Find first available provider in order of preference
+  const providers = ['2captcha', 'anticaptcha', 'capsolver'];
+  for (const provider of providers) {
+    const key = await getApiKey(provider);
+    if (!key) continue;
+    try {
+      const token = await _dispatchSolve(provider, key, params);
+      logger.info(MODULE, 'captcha-solved', { provider, type: params.type });
+      return token;
+    } catch (err) {
+      logger.warn(MODULE, 'captcha-provider-fail', { provider, error: err.message });
+    }
+  }
+
+  throw new Error('No captcha provider available or all failed');
+}
+
+async function _dispatchSolve(provider, key, { type, sitekey, pageUrl, imageBase64 }) {
+  if (provider === '2captcha') {
+    return _solve2captcha(key, { type, sitekey, pageUrl, imageBase64 });
+  }
+  if (provider === 'anticaptcha') {
+    return _solveAnticaptcha(key, { type, sitekey, pageUrl });
+  }
+  if (provider === 'capsolver') {
+    return _solveCapsolver(key, { type, sitekey, pageUrl });
+  }
+  throw new Error(`Unknown provider: ${provider}`);
+}
+
+async function _solve2captcha(key, { type, sitekey, pageUrl, imageBase64 }) {
+  let submitUrl, submitBody;
+  if (type === 'image') {
+    submitUrl  = 'https://2captcha.com/in.php';
+    submitBody = `key=${key}&method=base64&body=${encodeURIComponent(imageBase64)}&json=1`;
+  } else {
+    const method = type === 'hcaptcha' ? 'hcaptcha' : 'userrecaptcha';
+    submitUrl    = 'https://2captcha.com/in.php';
+    submitBody   = `key=${key}&method=${method}&googlekey=${sitekey}&pageurl=${encodeURIComponent(pageUrl)}&json=1`;
+  }
+
+  const submitRes  = await _timedFetch(submitUrl, { method: 'POST', body: new URLSearchParams(submitBody) });
+  const submitJson = await submitRes.json();
+  if (!submitJson.status) throw new Error(submitJson.request ?? 'Submit failed');
+
+  const captchaId = submitJson.request;
+  return _poll2captcha(key, captchaId);
+}
+
+async function _poll2captcha(key, captchaId, attempts = 0) {
+  if (attempts > 24) throw new Error('2captcha polling timeout');
+  await _sleep(5000);
+  const res   = await _timedFetch(`https://2captcha.com/res.php?key=${key}&action=get&id=${captchaId}&json=1`);
+  const json  = await res.json();
+  if (json.status === 0 && json.request === 'CAPCHA_NOT_READY') {
+    return _poll2captcha(key, captchaId, attempts + 1);
+  }
+  if (!json.status) throw new Error(json.request ?? 'Poll failed');
+  return json.request;
+}
+
+async function _solveAnticaptcha(key, { type, sitekey, pageUrl }) {
+  const taskType = type === 'hcaptcha' ? 'HCaptchaTaskProxyless' : 'NoCaptchaTaskProxyless';
+  const res = await _timedFetch('https://api.anti-captcha.com/createTask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key, task: { type: taskType, websiteURL: pageUrl, websiteKey: sitekey } }),
+  });
+  const json = await res.json();
+  if (json.errorId) throw new Error(json.errorDescription);
+  return _pollAnticaptcha(key, json.taskId);
+}
+
+async function _pollAnticaptcha(key, taskId, attempts = 0) {
+  if (attempts > 24) throw new Error('Anticaptcha polling timeout');
+  await _sleep(5000);
+  const res  = await _timedFetch('https://api.anti-captcha.com/getTaskResult', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key, taskId }),
+  });
+  const json = await res.json();
+  if (json.status === 'processing') return _pollAnticaptcha(key, taskId, attempts + 1);
+  if (json.errorId) throw new Error(json.errorDescription);
+  return json.solution?.gRecaptchaResponse ?? json.solution?.token;
+}
+
+async function _solveCapsolver(key, { type, sitekey, pageUrl }) {
+  const taskType = type === 'turnstile' ? 'AntiTurnstileTaskProxyless' : 'ReCaptchaV2TaskProxyless';
+  const res = await _timedFetch('https://api.capsolver.com/createTask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key, task: { type: taskType, websiteURL: pageUrl, websiteKey: sitekey } }),
+  });
+  const json = await res.json();
+  if (json.errorId) throw new Error(json.errorDescription);
+  return _pollCapsolver(key, json.taskId);
+}
+
+async function _pollCapsolver(key, taskId, attempts = 0) {
+  if (attempts > 24) throw new Error('Capsolver polling timeout');
+  await _sleep(5000);
+  const res  = await _timedFetch('https://api.capsolver.com/getTaskResult', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey: key, taskId }),
+  });
+  const json = await res.json();
+  if (json.status === 'processing') return _pollCapsolver(key, taskId, attempts + 1);
+  if (json.errorId) throw new Error(json.errorDescription);
+  return json.solution?.gRecaptchaResponse ?? json.solution?.token;
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// === END api-key-manager.js ===
