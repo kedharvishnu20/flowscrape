@@ -284,7 +284,10 @@ function bindGlobalControls() {
   });
 
   btnStop.addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: MSG.PIPELINE_STOP });
+    await chrome.runtime.sendMessage({ 
+      type: "pipeline:stop", 
+      payload: { runId: _runState.runId }
+    });
     stopRunUI();
     logToMonitor("warn-log", "Pipeline stopped by user.");
   });
@@ -1681,6 +1684,8 @@ function _registerKey(stepId) {
 // ── System listeners ──────────────────────────────────────────────────────────
 function listenToSystem() {
   chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.payload?.runId && msg.payload.runId !== _runState.runId) return;
+
     if (msg.type === "pipeline:status") {
       const info = msg.payload;
       if (info.progress?.total) {

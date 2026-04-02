@@ -52,9 +52,9 @@ const MODULE = "service-worker";
 // ── Utility helpers ────────────────────────────────────────────────────────────
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function _broadcastLog(level, message) {
+function _broadcastLog(level, message, runId) {
   chrome.runtime
-    .sendMessage({ type: "pipeline:log", payload: { level, message } })
+    .sendMessage({ type: "pipeline:log", payload: { level, message, runId } })
     .catch(() => {});
 }
 
@@ -79,14 +79,7 @@ const MSG = Object.freeze({
 
 // ── Pipeline run state ─────────────────────────────────────────────────────────
 /** @type {{ active: boolean, paused: boolean, runId: string|null, tabId: number|null, results: any[], screenshots: string[] }} */
-let _runState = {
-  active: false,
-  paused: false,
-  runId: null,
-  tabId: null,
-  results: [],
-  screenshots: [],
-};
+const _runStates = new Map();
 
 // ── SW activation ─────────────────────────────────────────────────────────────
 self.addEventListener("activate", async () => {
@@ -109,7 +102,7 @@ function _startHeartbeat() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "fs_sw_heartbeat") {
     // Just touching this listener keeps the SW alive
-    logger.debug(MODULE, "heartbeat", { active: _runState.active });
+    logger.debug(MODULE, "heartbeat", { active: _runStates.size > 0 });
   }
 });
 
@@ -153,19 +146,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ── Message handlers ───────────────────────────────────────────────────────────
 
 _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
-  if (_runState.active) throw new Error("Pipeline already running");
 
   const { pipeline, tabId } = payload;
   if (!pipeline) throw new Error("No pipeline provided");
 
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  _runState = {
+  const runState = {
     active: true,
     paused: false,
     runId,
     tabId: tabId ?? sender.tab?.id,
     results: [],
+    screenshots: []
   };
+  _runStates.set(runId, runState);
 
   // Persist state before any await
   await chrome.storage.local.set({
@@ -181,20 +175,14 @@ _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
     targetPath: targetPath ?? "/",
     timing: payload.timing ?? {},
     captcha: { enabled: captchaEnabled, authorized: captchaAuthorized },
-    tabId: _runState.tabId,
+    tabId: runState.tabId,
     confirmed: payload.confirmed ?? false,
     rowCount: payload.rowCount ?? 0,
   });
 
   // If ethics gates hard-blocked, abort the run
   if (ethicsResult.blocked) {
-    _runState = {
-      active: false,
-      paused: false,
-      runId: null,
-      tabId: null,
-      results: [],
-    };
+    _runStates.delete(runId);
     throw new EthicsBlock(
       ethicsResult.blocker.code,
       ethicsResult.blocker.message,
@@ -205,7 +193,7 @@ _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
   logger.info(MODULE, "pipeline-start", { runId, warnings: warnings.length });
 
   // Start execution loop async (do not await so UI returns early!)
-  _executePipeline(runId, pipeline, _runState.tabId).catch((err) => {
+  _executePipeline(runId, pipeline, runState.tabId).catch((err) => {
     logger.error(MODULE, "pipeline-crash", { runId, error: err.message });
   });
 
@@ -217,7 +205,9 @@ _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
 
 // ── Step execution helpers ─────────────────────────────────────────────────────
 
-async function _captureScreenshot(tabId, config = {}) {
+async function _captureScreenshot(tabId, config = {}, runId) {
+  const runState = _runStates.get(runId);
+  if (!runState) return;
   try {
     // Focus the tab so captureVisibleTab can see it
     await chrome.tabs.update(tabId, { active: true });
@@ -228,11 +218,11 @@ async function _captureScreenshot(tabId, config = {}) {
       quality: config.quality || 100,
     });
     // Store in memory for ZIP export
-    if (!Array.isArray(_runState.screenshots)) _runState.screenshots = [];
-    _runState.screenshots.push({ dataUrl, ts: Date.now() });
+    if (!Array.isArray(runState.screenshots)) runState.screenshots = [];
+    runState.screenshots.push({ dataUrl, ts: Date.now() });
     _broadcastLog(
       "info-log",
-      `Screenshot #${_runState.screenshots.length} captured.`,
+      `Screenshot #${runState.screenshots.length} captured.`, runId
     );
   } catch (err) {
     throw new Error(`Screenshot failed: ${err.message}`);
@@ -339,15 +329,17 @@ function _dataUrlToBytes(dataUrl) {
 }
 
 async function _doExport(runId, config) {
+  const runState = _runStates.get(runId);
+  if (!runState) return;
   const idbRows = await readAllRows(runId).catch(() => []);
-  const allRows = [..._runState.results];
+  const allRows = [...runState.results];
   const seen = new Set(allRows.map((r) => JSON.stringify(r)));
   for (const r of idbRows) {
     const { runId: _, ...clean } = r;
     if (!seen.has(JSON.stringify(clean))) allRows.push(clean);
   }
 
-  const screenshots = _runState.screenshots || [];
+  const screenshots = runState.screenshots || [];
   const enc = new TextEncoder();
   const fmt = config.format || "csv";
   const ts = Date.now();
@@ -414,7 +406,7 @@ async function _doExport(runId, config) {
     });
     _broadcastLog(
       "info-log",
-      `Exported ZIP: ${allRows.length} rows + ${screenshots.length} screenshots.`,
+      `Exported ZIP: ${allRows.length} rows + ${screenshots.length} screenshots.`, runId
     );
   } else if (allRows.length > 0) {
     const dataUrl = `data:${dataMime};charset=utf-8,\uFEFF${encodeURIComponent(dataContent)}`;
@@ -425,10 +417,10 @@ async function _doExport(runId, config) {
     });
     _broadcastLog(
       "info-log",
-      `Exported ${allRows.length} rows as ${fmt.toUpperCase()}.`,
+      `Exported ${allRows.length} rows as ${fmt.toUpperCase()}.`, runId
     );
   } else {
-    _broadcastLog("warn-log", "Export: no data collected.");
+    _broadcastLog("warn-log", "Export: no data collected.", runId);
   }
 }
 
@@ -621,20 +613,23 @@ async function _executeLoop(step, tabId, runId, parentCtx = {}) {
         _broadcastLog(
           "info-log",
           `Loop: found ${elementsData.length} elements for "${selector}"`,
+          runId
         );
       } else {
         _broadcastLog(
           "warn-log",
           `Loop: no elements matched "${selector}" — skipping.`,
+          runId
         );
         return;
       }
     } catch (e) {
-      _broadcastLog("warn-log", `Loop: element query failed: ${e.message}`);
+      _broadcastLog("warn-log", `Loop: element query failed: ${e.message}`, runId);
     }
   }
 
-  for (let i = 0; i < iters && _runState.active; i++) {
+  const runState = _runStates.get(runId);
+  for (let i = 0; i < iters && runState?.active; i++) {
     const item = elementsData?.[i] ?? {
       index: i + 1,
       index0: i,
@@ -674,9 +669,9 @@ async function _executeLoop(step, tabId, runId, parentCtx = {}) {
     }
     try {
       await _executeStepList(children, tabId, runId, loopCtx);
-      _broadcastLog("info-log", `Loop [${i + 1}/${iters}] done.`);
+      _broadcastLog("info-log", `Loop [${i + 1}/${iters}] done.`, runId);
     } catch (e) {
-      _broadcastLog("warn-log", `Loop [${i + 1}/${iters}] — ${e.message}`);
+      _broadcastLog("warn-log", `Loop [${i + 1}/${iters}] — ${e.message}`, runId);
       if (onFail === "stop") break;
     }
   }
@@ -695,6 +690,7 @@ async function _executeIfElse(step, tabId, runId, parentCtx = {}) {
   _broadcastLog(
     "info-log",
     `IF_ELSE: condition ${met ? "met → IF" : "not met → ELSE"} branch.`,
+    runId
   );
   await _executeStepList(
     met ? step.ifBranch || [] : step.elseBranch || [],
@@ -708,8 +704,9 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
   // ctx is mutable — EXTRACT results update it so later steps can use {{extracted.field}}
   const liveCtx = { ...ctx, extracted: { ...(ctx.extracted || {}) } };
 
+  const runState = _runStates.get(runId);
   for (const step of steps) {
-    if (!_runState.active || _runState.runId !== runId) break;
+    if (!runState || !runState.active) break;
 
     // Resolve template variables in this step's config
     const resolvedStep = _resolveConfig(step, liveCtx);
@@ -717,7 +714,7 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
     chrome.runtime
       .sendMessage({
         type: "pipeline:status",
-        payload: { state: "running", currentStepId: step.id, progress: {} },
+        payload: { state: "running", currentStepId: step.id, progress: {}, runId },
       })
       .catch(() => {});
 
@@ -727,7 +724,7 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
     } else if (resolvedStep.type === "WAIT") {
       await _sleep(resolvedStep.config.ms || 1000);
     } else if (resolvedStep.type === "SCREENSHOT") {
-      await _captureScreenshot(tabId, resolvedStep.config);
+      await _captureScreenshot(tabId, resolvedStep.config, runId);
     } else if (resolvedStep.type === "API") {
       const apiResult = await _executeApiStep(resolvedStep.config, liveCtx);
       const storeAs =
@@ -745,9 +742,10 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       _broadcastLog(
         "info-log",
         `API ${apiResult.method} ${apiResult.url} → ${apiResult.status}`,
+        runId
       );
     } else if (resolvedStep.type === "EXPORT") {
-      await finalizeBuffer().catch(() => {});
+      await finalizeBuffer(runId).catch(() => {});
       initBuffer(runId);
       await _doExport(runId, resolvedStep.config);
     } else if (resolvedStep.type === "LOOP") {
@@ -761,11 +759,12 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       });
       if (!resp?.ok) throw new Error(resp?.error || "Step failed");
       if (resolvedStep.type === "EXTRACT" && Array.isArray(resp.result)) {
-        _runState.results.push(...resp.result);
-        for (const row of resp.result) await pushRow(row);
+        runState.results.push(...resp.result);
+        for (const row of resp.result) await pushRow(runId, row);
         _broadcastLog(
           "info-log",
-          `Extracted ${resp.result.length} rows (total: ${_runState.results.length}).`,
+          `Extracted ${resp.result.length} rows (total: ${runState.results.length}).`,
+          runId
         );
         // Update live context so next steps can reference {{extracted.fieldName}}
         if (resp.result.length > 0)
@@ -784,11 +783,12 @@ async function _executePipeline(runId, pipeline, targetTabId) {
   initBuffer(runId);
 
   while (
-    _runState.active &&
-    _runState.runId === runId &&
+    _runStates.has(runId) &&
+    _runStates.get(runId).active &&
     stepIndex < pipeline.steps.length
   ) {
-    if (_runState.paused) {
+    const runState = _runStates.get(runId);
+    if (runState.paused) {
       await _sleep(1000);
       continue;
     }
@@ -802,6 +802,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
           state: "running",
           currentStepId: step.id,
           progress: { current: progressCount, total },
+          runId
         },
       })
       .catch(() => {});
@@ -813,7 +814,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
       } else if (resolvedStep.type === "WAIT") {
         await _sleep(resolvedStep.config.ms || 1000);
       } else if (resolvedStep.type === "SCREENSHOT") {
-        await _captureScreenshot(targetTabId, resolvedStep.config);
+        await _captureScreenshot(targetTabId, resolvedStep.config, runId);
       } else if (resolvedStep.type === "API") {
         const apiResult = await _executeApiStep(
           resolvedStep.config,
@@ -848,8 +849,8 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         });
         if (!resp?.ok) throw new Error(resp?.error || "Execution rejected");
         if (resolvedStep.type === "EXTRACT" && Array.isArray(resp.result)) {
-          _runState.results.push(...resp.result);
-          for (const row of resp.result) await pushRow(row);
+          runState.results.push(...resp.result);
+          for (const row of resp.result) await pushRow(runId, row);
           _broadcastLog(
             "info-log",
             `Extracted ${resp.result.length} rows. (auto-saved)`,
@@ -872,9 +873,10 @@ async function _executePipeline(runId, pipeline, targetTabId) {
       _broadcastLog(
         isCritical ? "error-log" : "warn-log",
         `[${resolvedStep.type}] ${err.message}${isCritical ? "" : " (optional, skipping)"}`,
+        runId
       );
       if (isCritical) {
-        _runState.active = false;
+        runState.active = false;
         break;
       }
       progressCount++;
@@ -882,8 +884,9 @@ async function _executePipeline(runId, pipeline, targetTabId) {
     }
   }
 
-  await finalizeBuffer().catch(() => {});
-  const stateStr = _runState.active ? "completed" : "stopped";
+  await finalizeBuffer(runId).catch(() => {});
+  const endRunState = _runStates.get(runId);
+  const stateStr = endRunState?.active ? "completed" : "stopped";
   chrome.runtime
     .sendMessage({
       type: "pipeline:status",
@@ -891,16 +894,11 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         state: stateStr,
         currentStepId: null,
         progress: { current: progressCount, total },
+        runId
       },
     })
     .catch(() => {});
-  _runState = {
-    active: false,
-    paused: false,
-    runId: null,
-    tabId: null,
-    results: [],
-  };
+  _runStates.delete(runId);
 }
 
 _registerHandler(MSG.STEP_EXECUTE, async (payload, sender) => {
@@ -942,24 +940,28 @@ _registerHandler(MSG.STEP_EXECUTE, async (payload, sender) => {
   return resp.result;
 });
 
-_registerHandler(MSG.PIPELINE_PAUSE, async () => {
-  _runState.paused = true;
-  logger.info(MODULE, "pipeline-paused", { runId: _runState.runId });
+_registerHandler(MSG.PIPELINE_PAUSE, async (payload) => {
+  const rs = _runStates.get(payload?.runId);
+  if(rs) {
+    rs.paused = true;
+    logger.info(MODULE, "pipeline-paused", { runId: rs.runId });
+  }
   return { ok: true };
 });
 
-_registerHandler(MSG.PIPELINE_STOP, async () => {
-  _runState.active = false;
-  _runState.paused = false;
-  const runId = _runState.runId;
-  _runState.runId = null;
-  await chrome.alarms.clear("fs_sw_heartbeat");
-  logger.info(MODULE, "pipeline-stopped", { runId });
+_registerHandler(MSG.PIPELINE_STOP, async (payload) => {
+  const rs = _runStates.get(payload?.runId);
+  if(rs) {
+    rs.active = false;
+    rs.paused = false;
+    logger.info(MODULE, "pipeline-stopped", { runId: rs.runId });
+  }
+  if(_runStates.size === 0) await chrome.alarms.clear("fs_sw_heartbeat");
   return { ok: true };
 });
 
-_registerHandler(MSG.PIPELINE_STATUS, async () => {
-  return { ..._runState };
+_registerHandler(MSG.PIPELINE_STATUS, async (payload) => {
+  return { ...(_runStates.get(payload?.runId) || { active: false, paused: false, runId: payload?.runId }) };
 });
 
 _registerHandler(MSG.PROXY_SELECT, async (payload) => {

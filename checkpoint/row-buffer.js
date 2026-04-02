@@ -22,10 +22,8 @@ const FLUSH_ROWS_COUNT  = 50;
 const DB_NAME           = 'flowscrape_v3';
 const STORE_ROWS        = 'data_rows';
 
-/** @type {object[]} */
-let _buffer     = [];
-let _flushTimer = null;
-let _runId      = null;
+const _buffers     = new Map();
+const _flushTimers = new Map();
 let _idbDB      = null;
 
 // ── IDB helpers ───────────────────────────────────────────────────────────────
@@ -45,13 +43,13 @@ async function _openDB() {
   });
 }
 
-async function _writeRows(rows) {
+async function _writeRows(runId, rows) {
   const db = await _openDB();
   return new Promise((resolve, reject) => {
     const tx    = db.transaction([STORE_ROWS], 'readwrite');
     const store = tx.objectStore(STORE_ROWS);
     for (const row of rows) {
-      store.put({ runId: _runId, ...row });
+      store.put({ runId, ...row });
     }
     tx.oncomplete = resolve;
     tx.onerror    = () => reject(tx.error);
@@ -65,67 +63,79 @@ async function _writeRows(rows) {
  * @param {string} runId
  */
 export function initBuffer(runId) {
-  _runId  = runId;
-  _buffer = [];
-  _startFlushTimer();
+  _buffers.set(runId, []);
+  _startFlushTimer(runId);
   logger.info(MODULE, 'buffer-init', { runId });
 }
 
 /**
  * Push a result row into the buffer. Flushes if threshold reached.
+ * @param {string} runId
  * @param {object} row
  * @returns {Promise<void>}
  */
-export async function pushRow(row) {
-  _buffer.push(row);
-  if (_buffer.length >= FLUSH_ROWS_COUNT) {
-    await flush();
+export async function pushRow(runId, row) {
+  const buf = _buffers.get(runId) || [];
+  buf.push(row);
+  _buffers.set(runId, buf);
+  if (buf.length >= FLUSH_ROWS_COUNT) {
+    await flush(runId);
   }
 }
 
 /**
  * Flush all buffered rows to IndexedDB now.
+ * @param {string} runId
  * @returns {Promise<void>}
  */
-export async function flush() {
-  if (_buffer.length === 0) return;
-  const toWrite = _buffer.splice(0, _buffer.length);
+export async function flush(runId) {
+  const buf = _buffers.get(runId) || [];
+  if (buf.length === 0) return;
+  const toWrite = buf.splice(0, buf.length);
   try {
-    await _writeRows(toWrite);
-    logger.debug(MODULE, 'flush-ok', { count: toWrite.length, runId: _runId });
+    await _writeRows(runId, toWrite);
+    logger.debug(MODULE, 'flush-ok', { count: toWrite.length, runId });
   } catch (err) {
-    // Put rows back to avoid data loss
-    _buffer.unshift(...toWrite);
-    logger.error(MODULE, 'flush-fail', { error: err.message });
+    buf.unshift(...toWrite);
+    logger.error(MODULE, 'flush-fail', { error: err.message, runId });
     throw err;
   }
 }
 
 /**
  * Start periodic flush timer.
+ * @param {string} runId 
  */
-function _startFlushTimer() {
-  _stopFlushTimer();
-  _flushTimer = setInterval(async () => {
-    try { await flush(); } catch { /* logged in flush() */ }
+function _startFlushTimer(runId) {
+  _stopFlushTimer(runId);
+  const timer = setInterval(async () => {
+    try { await flush(runId); } catch { /* logged in flush() */ }
   }, FLUSH_INTERVAL_MS);
+  _flushTimers.set(runId, timer);
 }
 
 /**
  * Stop the periodic flush timer.
+ * @param {string} runId 
  */
-function _stopFlushTimer() {
-  if (_flushTimer) { clearInterval(_flushTimer); _flushTimer = null; }
+function _stopFlushTimer(runId) {
+  const timer = _flushTimers.get(runId);
+  if (timer) {
+    clearInterval(timer);
+    _flushTimers.delete(runId);
+  }
 }
 
 /**
  * Finalize: flush remaining rows and stop timer.
+ * @param {string} runId 
  * @returns {Promise<void>}
  */
-export async function finalizeBuffer() {
-  _stopFlushTimer();
-  await flush();
-  logger.info(MODULE, 'buffer-finalized', { runId: _runId });
+export async function finalizeBuffer(runId) {
+  _stopFlushTimer(runId);
+  await flush(runId);
+  _buffers.delete(runId);
+  logger.info(MODULE, 'buffer-finalized', { runId });
 }
 
 /**
