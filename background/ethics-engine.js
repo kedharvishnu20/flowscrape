@@ -13,26 +13,33 @@
  * @dependencies robots-parser, pii-detector, overlay-engine (via content message), logger
  */
 
-'use strict';
+"use strict";
 
-import { logger }      from '../utils/logger.js';
-import { parseRobots, isAllowedByRules } from '../ethics/robots-parser.js';
-import { scanText }    from '../ethics/pii-detector.js';
+import { logger } from "../utils/logger.js";
+import { parseRobots, isAllowedByRules } from "../ethics/robots-parser.js";
+import { scanText } from "../ethics/pii-detector.js";
 
-const MODULE = 'ethics-engine';
+const MODULE = "ethics-engine";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const MAX_FORM_ROWS_DEFAULT   = 500;
+const MAX_FORM_ROWS_DEFAULT = 500;
 const MAX_FORM_ROWS_CONFIRMED = 5000;
-const MIN_INTER_ROW_DELAY_MS  = 800;
-const ROBOTS_CACHE_TTL_MS     = 15 * 60 * 1000; // 15 minutes
+const MIN_INTER_ROW_DELAY_MS = 800;
+const ROBOTS_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 // ── Block/warn error classes ──────────────────────────────────────────────────
 export class EthicsBlock extends Error {
-  constructor(code, message) { super(message); this.code = code; this.name = 'EthicsBlock'; }
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = "EthicsBlock";
+  }
 }
 export class EthicsWarn {
-  constructor(code, message) { this.code = code; this.message = message; }
+  constructor(code, message) {
+    this.code = code;
+    this.message = message;
+  }
 }
 
 // ── robots.txt cache ──────────────────────────────────────────────────────────
@@ -44,13 +51,15 @@ async function _fetchRobots(origin) {
     return cached.parsed;
   }
   try {
-    const resp = await fetch(`${origin}/robots.txt`, { signal: AbortSignal.timeout(5000) });
-    const text = resp.ok ? await resp.text() : '';
+    const resp = await fetch(`${origin}/robots.txt`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const text = resp.ok ? await resp.text() : "";
     const parsed = parseRobots(text, origin);
     _robotsCache.set(origin, { parsed, fetchedAt: Date.now() });
     return parsed;
   } catch {
-    logger.warn(MODULE, 'robots-fetch-fail', { origin });
+    logger.warn(MODULE, "robots-fetch-fail", { origin });
     return null; // unreachable → allow with warning
   }
 }
@@ -61,18 +70,24 @@ async function _gate1_robots(targetOrigin, targetPath, bypass) {
   if (bypass) return null;
   const robots = await _fetchRobots(targetOrigin);
   if (!robots) {
-    return new EthicsWarn('RobotsTxt', `Could not fetch robots.txt from ${targetOrigin} — proceeding with caution`);
+    return new EthicsWarn(
+      "RobotsTxt",
+      `Could not fetch robots.txt from ${targetOrigin} — proceeding with caution`,
+    );
   }
-  const disallowed = !isAllowedByRules(robots, targetPath, 'FlowScrape');
+  const disallowed = !isAllowedByRules(robots, targetPath, "FlowScrape");
   if (disallowed) {
-    return new EthicsWarn('RobotsTxt', `robots.txt Disallows access to ${targetPath} — confirm to override`);
+    return new EthicsWarn(
+      "RobotsTxt",
+      `robots.txt Disallows access to ${targetPath} — confirm to override`,
+    );
   }
   return null;
 }
 
 async function _gate2_pii(pipelineSteps) {
   // Only scan FORM_FILL data sources
-  const formSteps = pipelineSteps.filter(s => s.type === 'FORM_FILL');
+  const formSteps = pipelineSteps.filter((s) => s.type === "FORM_FILL");
   if (!formSteps.length) return null;
 
   // We can't read the actual file here in SW; PII check deferred to content script
@@ -83,23 +98,27 @@ async function _gate2_pii(pipelineSteps) {
 
 function _gate3_rateLimit(pipelineSteps, timingConfig) {
   const stepCount = pipelineSteps.length;
-  const minDelay  = timingConfig?.min ?? 1200;
-  const estimatedReqPerHr = Math.round(3600000 / minDelay * stepCount);
+  const minDelay = timingConfig?.min ?? 1200;
+  const estimatedReqPerHr = Math.round((3600000 / minDelay) * stepCount);
   if (estimatedReqPerHr > 100) {
-    return new EthicsWarn('HighRate',
-      `Estimated rate: ~${estimatedReqPerHr} req/hr (> 100 threshold). Review timing settings.`);
+    return new EthicsWarn(
+      "HighRate",
+      `Estimated rate: ~${estimatedReqPerHr} req/hr (> 100 threshold). Review timing settings.`,
+    );
   }
   return null;
 }
 
 function _gate4_captcha(pipelineSteps, captchaConfig) {
   if (!captchaConfig?.enabled) return null;
-  const formSteps = pipelineSteps.filter(s => s.type === 'FORM_FILL');
-  const minDelay  = formSteps[0]?.config?.interRowDelay?.min ?? 1200;
+  const formSteps = pipelineSteps.filter((s) => s.type === "FORM_FILL");
+  const minDelay = formSteps[0]?.config?.interRowDelay?.min ?? 1200;
   const solveRatePerHr = Math.round(3600000 / minDelay);
   if (solveRatePerHr > 50) {
-    return new EthicsWarn('HighCaptchaVolume',
-      `Estimated captcha solves: ~${solveRatePerHr}/hr (> 50 threshold)`);
+    return new EthicsWarn(
+      "HighCaptchaVolume",
+      `Estimated captcha solves: ~${solveRatePerHr}/hr (> 50 threshold)`,
+    );
   }
   return null;
 }
@@ -108,8 +127,10 @@ function _gate5_proxyGeo(proxyEntry, declaredRegion) {
   // Simplified region comparison — actual Haversine would require geo data
   if (!proxyEntry?.country || !declaredRegion) return null;
   if (proxyEntry.country.toUpperCase() !== declaredRegion.toUpperCase()) {
-    return new EthicsWarn('ProxyGeoMismatch',
-      `Proxy country (${proxyEntry.country}) ≠ declared region (${declaredRegion})`);
+    return new EthicsWarn(
+      "ProxyGeoMismatch",
+      `Proxy country (${proxyEntry.country}) ≠ declared region (${declaredRegion})`,
+    );
   }
   return null;
 }
@@ -117,10 +138,17 @@ function _gate5_proxyGeo(proxyEntry, declaredRegion) {
 function _gate6_domainLock(pipelineSteps, targetOrigin) {
   // Skip domain-lock entirely when launched from an internal/new-tab page.
   // chrome://newtab, about:blank, chrome-extension://* are not real site origins.
-  const internalPrefixes = ['chrome', 'about', 'edge', 'chrome-extension', 'moz-extension'];
-  const isInternalOrigin = !targetOrigin ||
-    targetOrigin === 'null' ||
-    internalPrefixes.some(p => targetOrigin.startsWith(p));
+  const internalPrefixes = [
+    "chrome",
+    "about",
+    "edge",
+    "chrome-extension",
+    "moz-extension",
+  ];
+  const isInternalOrigin =
+    !targetOrigin ||
+    targetOrigin === "null" ||
+    internalPrefixes.some((p) => targetOrigin.startsWith(p));
 
   if (isInternalOrigin) return null; // allow freely when starting from new tab
 
@@ -128,17 +156,23 @@ function _gate6_domainLock(pipelineSteps, targetOrigin) {
     const cfg = step.config ?? {};
     let stepOrigin = null;
 
-    if (step.type === 'NAVIGATE' && cfg.url) {
-      try { stepOrigin = new URL(cfg.url).origin; } catch {}
-    } else if (step.type === 'FORM_FILL' && cfg.submitOrigin) {
+    if ((step.type === "WEBSITE" || step.type === "NAVIGATE") && cfg.url) {
+      try {
+        stepOrigin = new URL(cfg.url).origin;
+      } catch {}
+    } else if (step.type === "FORM_FILL" && cfg.submitOrigin) {
       stepOrigin = cfg.submitOrigin;
-    } else if (step.type === 'API_FETCH' && cfg.url) {
-      try { stepOrigin = new URL(cfg.url).origin; } catch {}
+    } else if ((step.type === "API" || step.type === "API_FETCH") && cfg.url) {
+      try {
+        stepOrigin = new URL(cfg.url).origin;
+      } catch {}
     }
 
     if (stepOrigin && stepOrigin !== targetOrigin) {
-      return new EthicsBlock('DomainMismatch',
-        `Step "${step.type}" targets ${stepOrigin} but pipeline origin is ${targetOrigin}`);
+      return new EthicsBlock(
+        "DomainMismatch",
+        `Step "${step.type}" targets ${stepOrigin} but pipeline origin is ${targetOrigin}`,
+      );
     }
   }
   return null;
@@ -154,16 +188,17 @@ function _gate6_domainLock(pipelineSteps, targetOrigin) {
 async function _gate7_overlayReadiness(steps, tabId) {
   try {
     const result = await chrome.tabs.sendMessage(tabId, {
-      type:    'overlay:setMode',
-      payload: { action: 'previewAll', steps },
+      type: "overlay:setMode",
+      payload: { action: "previewAll", steps },
     });
     if (result?.unmatched?.length > 0) {
-      return new EthicsWarn('SelectorNotFound',
-        `${result.unmatched.length} selector(s) not found on page: ${result.unmatched.slice(0, 3).join(', ')}${result.unmatched.length > 3 ? '…' : ''}`
+      return new EthicsWarn(
+        "SelectorNotFound",
+        `${result.unmatched.length} selector(s) not found on page: ${result.unmatched.slice(0, 3).join(", ")}${result.unmatched.length > 3 ? "…" : ""}`,
       );
     }
   } catch (err) {
-    logger.warn(MODULE, 'gate7-overlay-check-fail', { error: err.message });
+    logger.warn(MODULE, "gate7-overlay-check-fail", { error: err.message });
     // Non-fatal: content script may not be loaded yet
   }
   return null;
@@ -175,24 +210,34 @@ function _checkFormFillHardConstraints(config, rowCount, confirmed) {
   // Delay floor
   const minDelay = config.interRowDelay?.min ?? 1200;
   if (minDelay < MIN_INTER_ROW_DELAY_MS) {
-    throw new EthicsBlock('DelayFloor',
-      `Inter-row delay ${minDelay}ms < minimum ${MIN_INTER_ROW_DELAY_MS}ms`);
+    throw new EthicsBlock(
+      "DelayFloor",
+      `Inter-row delay ${minDelay}ms < minimum ${MIN_INTER_ROW_DELAY_MS}ms`,
+    );
   }
 
   // Row cap
   const cap = confirmed ? MAX_FORM_ROWS_CONFIRMED : MAX_FORM_ROWS_DEFAULT;
   if (rowCount > cap) {
-    throw new EthicsBlock('SubmitCapExceeded',
-      `Row count ${rowCount} exceeds cap ${cap} (confirmed=${confirmed})`);
+    throw new EthicsBlock(
+      "SubmitCapExceeded",
+      `Row count ${rowCount} exceeds cap ${cap} (confirmed=${confirmed})`,
+    );
   }
 
   // Field type checks (password / hidden)
-  for (const mapping of (config.fieldMappings ?? [])) {
-    if (mapping.inputType === 'password') {
-      throw new EthicsBlock('PasswordField', `Password field in mapping: ${mapping.selector}`);
+  for (const mapping of config.fieldMappings ?? []) {
+    if (mapping.inputType === "password") {
+      throw new EthicsBlock(
+        "PasswordField",
+        `Password field in mapping: ${mapping.selector}`,
+      );
     }
-    if (mapping.inputType === 'hidden') {
-      throw new EthicsBlock('HiddenField', `Hidden field in mapping: ${mapping.selector}`);
+    if (mapping.inputType === "hidden") {
+      throw new EthicsBlock(
+        "HiddenField",
+        `Hidden field in mapping: ${mapping.selector}`,
+      );
     }
   }
 }
@@ -223,17 +268,17 @@ function _checkFormFillHardConstraints(config, rowCount, confirmed) {
  */
 export async function runEthicsGates(opts = {}) {
   const {
-    steps         = [],
-    targetOrigin  = '',
-    targetPath    = '/',
-    timing        = {},
-    proxy         = null,
-    region        = null,
-    captcha       = {},
-    tabId         = null,
-    confirmed     = false,
-    rowCount      = 0,
-    bypassRobots  = false,
+    steps = [],
+    targetOrigin = "",
+    targetPath = "/",
+    timing = {},
+    proxy = null,
+    region = null,
+    captcha = {},
+    tabId = null,
+    confirmed = false,
+    rowCount = 0,
+    bypassRobots = false,
   } = opts;
 
   const warnings = [];
@@ -260,18 +305,21 @@ export async function runEthicsGates(opts = {}) {
   // Gate 6: Domain lock (can throw EthicsBlock)
   const g6 = _gate6_domainLock(steps, targetOrigin);
   if (g6 instanceof EthicsBlock) {
-    logger.error(MODULE, 'gate6-block', { code: g6.code, message: g6.message });
+    logger.error(MODULE, "gate6-block", { code: g6.code, message: g6.message });
     return { blocked: true, blocker: g6, warnings };
   }
 
   // FORM_FILL hard constraints
-  const formSteps = steps.filter(s => s.type === 'FORM_FILL');
+  const formSteps = steps.filter((s) => s.type === "FORM_FILL");
   for (const step of formSteps) {
     try {
       _checkFormFillHardConstraints(step.config ?? {}, rowCount, confirmed);
     } catch (err) {
       if (err instanceof EthicsBlock) {
-        logger.error(MODULE, 'form-fill-block', { code: err.code, message: err.message });
+        logger.error(MODULE, "form-fill-block", {
+          code: err.code,
+          message: err.message,
+        });
         return { blocked: true, blocker: err, warnings };
       }
       throw err;
@@ -284,8 +332,9 @@ export async function runEthicsGates(opts = {}) {
     if (w7) warnings.push(w7);
   }
 
-  logger.info(MODULE, 'gates-complete', {
-    blocked: false, warnings: warnings.map(w => w.code),
+  logger.info(MODULE, "gates-complete", {
+    blocked: false,
+    warnings: warnings.map((w) => w.code),
   });
 
   return { blocked: false, blocker: null, warnings };

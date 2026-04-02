@@ -479,6 +479,124 @@ function _resolveConfig(step, ctx) {
   return { ...step, config: cfg, __fsContext: ctx };
 }
 
+function _resolveAny(value, ctx) {
+  if (typeof value === "string") return _resolveStr(value, ctx);
+  if (Array.isArray(value)) return value.map((v) => _resolveAny(v, ctx));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = _resolveAny(v, ctx);
+    return out;
+  }
+  return value;
+}
+
+function _parseApiHeaders(rawHeaders, ctx) {
+  if (!rawHeaders) return {};
+  if (typeof rawHeaders === "string") {
+    const rendered = _resolveStr(rawHeaders, ctx);
+    try {
+      const parsed = JSON.parse(rendered);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return _resolveAny(parsed, ctx);
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+  if (
+    rawHeaders &&
+    typeof rawHeaders === "object" &&
+    !Array.isArray(rawHeaders)
+  ) {
+    return _resolveAny(rawHeaders, ctx);
+  }
+  return {};
+}
+
+async function _executeApiStep(config = {}, ctx = {}) {
+  const method = String(config.method || "GET").toUpperCase();
+  const url = _resolveStr(config.url || config.endpoint || "", ctx);
+  if (!url) throw new Error("API step missing URL");
+
+  const headers = _parseApiHeaders(config.headers, ctx);
+  const timeoutMs = Math.max(500, Number(config.timeoutMs ?? 15000));
+  const responseType = String(config.responseType || "auto").toLowerCase();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const init = {
+      method,
+      headers,
+      signal: controller.signal,
+    };
+
+    if (!["GET", "HEAD"].includes(method)) {
+      const bodyText = _resolveStr(config.body || "", ctx);
+      if (bodyText) {
+        if (
+          (headers["Content-Type"] || headers["content-type"] || "").includes(
+            "application/json",
+          )
+        ) {
+          try {
+            init.body = JSON.stringify(JSON.parse(bodyText));
+          } catch {
+            init.body = bodyText;
+          }
+        } else {
+          init.body = bodyText;
+        }
+      }
+    }
+
+    const startedAt = Date.now();
+    const resp = await fetch(url, init);
+    const contentType = resp.headers.get("content-type") || "";
+    let body;
+
+    if (
+      responseType === "json" ||
+      (responseType === "auto" && contentType.includes("application/json"))
+    ) {
+      try {
+        body = await resp.json();
+      } catch {
+        body = await resp.text();
+      }
+    } else {
+      body = await resp.text();
+    }
+
+    const result = {
+      ok: resp.ok,
+      status: resp.status,
+      statusText: resp.statusText,
+      url: resp.url,
+      method,
+      elapsedMs: Date.now() - startedAt,
+      headers: Object.fromEntries(resp.headers.entries()),
+      body,
+    };
+
+    if (!resp.ok && config.failOnHttpError !== false) {
+      throw new Error(
+        `API ${method} ${url} failed: ${resp.status} ${resp.statusText}`,
+      );
+    }
+
+    return result;
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`API ${method} ${url} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function _executeLoop(step, tabId, runId, parentCtx = {}) {
   const {
     type: ltype = "count",
@@ -603,13 +721,31 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       })
       .catch(() => {});
 
-    if (resolvedStep.type === "NAVIGATE") {
+    if (resolvedStep.type === "WEBSITE" || resolvedStep.type === "NAVIGATE") {
       await chrome.tabs.update(tabId, { url: resolvedStep.config.url });
       await _sleep(resolvedStep.config.wait ? 3000 : 800);
     } else if (resolvedStep.type === "WAIT") {
       await _sleep(resolvedStep.config.ms || 1000);
     } else if (resolvedStep.type === "SCREENSHOT") {
       await _captureScreenshot(tabId, resolvedStep.config);
+    } else if (resolvedStep.type === "API") {
+      const apiResult = await _executeApiStep(resolvedStep.config, liveCtx);
+      const storeAs =
+        String(resolvedStep.config.storeAs || "api").trim() || "api";
+      liveCtx[storeAs] = apiResult;
+      liveCtx.api = apiResult;
+      if (
+        resolvedStep.config.exposeBodyAsExtracted === true &&
+        apiResult.body &&
+        typeof apiResult.body === "object" &&
+        !Array.isArray(apiResult.body)
+      ) {
+        Object.assign(liveCtx.extracted, apiResult.body);
+      }
+      _broadcastLog(
+        "info-log",
+        `API ${apiResult.method} ${apiResult.url} → ${apiResult.status}`,
+      );
     } else if (resolvedStep.type === "EXPORT") {
       await finalizeBuffer().catch(() => {});
       initBuffer(runId);
@@ -644,6 +780,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
   let stepIndex = 0,
     progressCount = 0;
   const total = pipeline.steps.length;
+  const runtimeCtx = { extracted: {} };
   initBuffer(runId);
 
   while (
@@ -657,6 +794,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
     }
 
     const step = pipeline.steps[stepIndex];
+    const resolvedStep = _resolveConfig(step, runtimeCtx);
     chrome.runtime
       .sendMessage({
         type: "pipeline:status",
@@ -669,32 +807,59 @@ async function _executePipeline(runId, pipeline, targetTabId) {
       .catch(() => {});
 
     try {
-      if (step.type === "NAVIGATE") {
-        await chrome.tabs.update(targetTabId, { url: step.config.url });
-        await _sleep(step.config.wait ? 3000 : 800);
-      } else if (step.type === "WAIT") {
-        await _sleep(step.config.ms || 1000);
-      } else if (step.type === "SCREENSHOT") {
-        await _captureScreenshot(targetTabId, step.config);
-      } else if (step.type === "EXPORT") {
-        await _doExport(runId, step.config);
-      } else if (step.type === "LOOP") {
-        await _executeLoop(step, targetTabId, runId);
-      } else if (step.type === "IF_ELSE") {
-        await _executeIfElse(step, targetTabId, runId);
+      if (resolvedStep.type === "WEBSITE" || resolvedStep.type === "NAVIGATE") {
+        await chrome.tabs.update(targetTabId, { url: resolvedStep.config.url });
+        await _sleep(resolvedStep.config.wait ? 3000 : 800);
+      } else if (resolvedStep.type === "WAIT") {
+        await _sleep(resolvedStep.config.ms || 1000);
+      } else if (resolvedStep.type === "SCREENSHOT") {
+        await _captureScreenshot(targetTabId, resolvedStep.config);
+      } else if (resolvedStep.type === "API") {
+        const apiResult = await _executeApiStep(
+          resolvedStep.config,
+          runtimeCtx,
+        );
+        const storeAs =
+          String(resolvedStep.config.storeAs || "api").trim() || "api";
+        runtimeCtx[storeAs] = apiResult;
+        runtimeCtx.api = apiResult;
+        if (
+          resolvedStep.config.exposeBodyAsExtracted === true &&
+          apiResult.body &&
+          typeof apiResult.body === "object" &&
+          !Array.isArray(apiResult.body)
+        ) {
+          Object.assign(runtimeCtx.extracted, apiResult.body);
+        }
+        _broadcastLog(
+          "info-log",
+          `API ${apiResult.method} ${apiResult.url} → ${apiResult.status}`,
+        );
+      } else if (resolvedStep.type === "EXPORT") {
+        await _doExport(runId, resolvedStep.config);
+      } else if (resolvedStep.type === "LOOP") {
+        await _executeLoop(resolvedStep, targetTabId, runId, runtimeCtx);
+      } else if (resolvedStep.type === "IF_ELSE") {
+        await _executeIfElse(resolvedStep, targetTabId, runId, runtimeCtx);
       } else {
         const resp = await chrome.tabs.sendMessage(targetTabId, {
           type: "step:execute",
-          payload: step,
+          payload: resolvedStep,
         });
         if (!resp?.ok) throw new Error(resp?.error || "Execution rejected");
-        if (step.type === "EXTRACT" && Array.isArray(resp.result)) {
+        if (resolvedStep.type === "EXTRACT" && Array.isArray(resp.result)) {
           _runState.results.push(...resp.result);
           for (const row of resp.result) await pushRow(row);
           _broadcastLog(
             "info-log",
             `Extracted ${resp.result.length} rows. (auto-saved)`,
           );
+          if (resp.result.length > 0) {
+            Object.assign(
+              runtimeCtx.extracted,
+              resp.result[resp.result.length - 1],
+            );
+          }
         }
       }
       progressCount++;
@@ -703,10 +868,10 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         () => {},
       );
     } catch (err) {
-      const isCritical = !step.config.optional;
+      const isCritical = !resolvedStep.config.optional;
       _broadcastLog(
         isCritical ? "error-log" : "warn-log",
-        `[${step.type}] ${err.message}${isCritical ? "" : " (optional, skipping)"}`,
+        `[${resolvedStep.type}] ${err.message}${isCritical ? "" : " (optional, skipping)"}`,
       );
       if (isCritical) {
         _runState.active = false;
@@ -741,15 +906,27 @@ async function _executePipeline(runId, pipeline, targetTabId) {
 _registerHandler(MSG.STEP_EXECUTE, async (payload, sender) => {
   const { step, tabId } = payload;
   const targetTabId = tabId ?? sender.tab?.id;
+  const testCtx = payload?.context || {};
+  const resolvedStep = _resolveConfig(step, testCtx);
+
+  if (resolvedStep.type === "API") {
+    return _executeApiStep(resolvedStep.config, testCtx);
+  }
+
   if (!targetTabId)
     throw new Error("No target tab specified for execution test");
+
+  if (resolvedStep.type === "WEBSITE" || resolvedStep.type === "NAVIGATE") {
+    await chrome.tabs.update(targetTabId, { url: resolvedStep.config.url });
+    return { navigated: true, url: resolvedStep.config.url };
+  }
 
   // Suppress the giant red error log output natively by catching the error locally and wrapping it nicely!
   let resp;
   try {
     resp = await chrome.tabs.sendMessage(targetTabId, {
       type: "step:execute",
-      payload: step,
+      payload: resolvedStep,
     });
   } catch (err) {
     if (err.message.includes("Receiving end does not exist")) {

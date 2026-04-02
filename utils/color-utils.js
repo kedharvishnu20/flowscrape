@@ -12,46 +12,48 @@
  * @dependencies none
  */
 
-'use strict';
+"use strict";
 
 // ── Canonical palette (mirrors CSS variable registry) ────────────────────────
 export const ZONE_PALETTE = [
-  '#3B82F6',  // 0 — blue    (NAVIGATE)
-  '#10B981',  // 1 — green   (EXTRACT)
-  '#F59E0B',  // 2 — amber   (FORM_FILL)
-  '#8B5CF6',  // 3 — violet  (CLICK)
-  '#EF4444',  // 4 — red     (errors)
-  '#06B6D4',  // 5 — cyan    (SCROLL)
-  '#EC4899',  // 6 — pink    (WAIT)
-  '#84CC16',  // 7 — lime    (PAGINATE)
+  "#3B82F6", // 0 — blue    (NAVIGATE)
+  "#10B981", // 1 — green   (EXTRACT)
+  "#F59E0B", // 2 — amber   (FORM_FILL)
+  "#8B5CF6", // 3 — violet  (CLICK)
+  "#EF4444", // 4 — red     (errors)
+  "#06B6D4", // 5 — cyan    (SCROLL)
+  "#EC4899", // 6 — pink    (WAIT)
+  "#84CC16", // 7 — lime    (PAGINATE)
 ];
 
-export const COLOR_CAPTCHA  = '#F97316';  // orange
-export const COLOR_BLOCKED  = '#6B7280';  // gray
-export const COLOR_SUCCESS  = '#22C55E';  // green
-export const COLOR_WARNING  = '#FACC15';  // yellow
-export const COLOR_ERROR    = '#EF4444';  // red
+export const COLOR_CAPTCHA = "#F97316"; // orange
+export const COLOR_BLOCKED = "#6B7280"; // gray
+export const COLOR_SUCCESS = "#22C55E"; // green
+export const COLOR_WARNING = "#FACC15"; // yellow
+export const COLOR_ERROR = "#EF4444"; // red
 
 // Step-type-to-palette-index map
 export const STEP_COLOR_INDEX = {
-  NAVIGATE:       0,
-  API_FETCH:      0,
-  LOOP:           0,
-  EXTRACT:        1,
-  API_EXTRACT:    1,
-  FORM_FILL:      2,
-  OPEN_MODAL:     2,
-  CONDITIONAL:    2,
-  CLICK:          3,
-  SCROLL_TO_CLICK:3,
-  API_AUTH:       3,
-  SCROLL:         5,
-  SCREENSHOT:     5,
-  WAIT:           6,
-  PAGINATE:       7,
-  API_PAGINATE:   7,
-  CAPTCHA_SOLVE:  -1,  // uses COLOR_CAPTCHA
-  PROXY_ROTATE:   0,
+  WEBSITE: 0,
+  NAVIGATE: 0,
+  API: 0,
+  API_FETCH: 0,
+  LOOP: 0,
+  EXTRACT: 1,
+  API_EXTRACT: 1,
+  FORM_FILL: 2,
+  OPEN_MODAL: 2,
+  CONDITIONAL: 2,
+  CLICK: 3,
+  SCROLL_TO_CLICK: 3,
+  API_AUTH: 3,
+  SCROLL: 5,
+  SCREENSHOT: 5,
+  WAIT: 6,
+  PAGINATE: 7,
+  API_PAGINATE: 7,
+  CAPTCHA_SOLVE: -1, // uses COLOR_CAPTCHA
+  PROXY_ROTATE: 0,
 };
 
 /**
@@ -60,7 +62,7 @@ export const STEP_COLOR_INDEX = {
  * @returns {string} CSS color
  */
 export function stepColor(stepType) {
-  if (stepType === 'CAPTCHA_SOLVE') return COLOR_CAPTCHA;
+  if (stepType === "CAPTCHA_SOLVE") return COLOR_CAPTCHA;
   const idx = STEP_COLOR_INDEX[stepType] ?? 0;
   return ZONE_PALETTE[idx];
 }
@@ -83,8 +85,12 @@ export function fieldColor(fieldIndex, customPalette) {
  * @returns {{ r: number, g: number, b: number }}
  */
 export function hexToRGB(hex) {
-  let h = hex.replace('#', '');
-  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  let h = hex.replace("#", "");
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
   const n = parseInt(h, 16);
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
@@ -110,7 +116,7 @@ export function relativeLuminance(hex) {
  */
 export function badgeTextColor(backgroundHex) {
   const lum = relativeLuminance(backgroundHex);
-  return lum > 0.5 ? '#111827' : '#ffffff';
+  return lum > 0.5 ? "#111827" : "#ffffff";
 }
 
 /**
@@ -133,7 +139,10 @@ export function hexToRGBA(hex, opacity) {
 export function darken(hex, factor) {
   const { r, g, b } = hexToRGB(hex);
   const d = 1 - factor;
-  const toHex = n => Math.round(n * d).toString(16).padStart(2, '0');
+  const toHex = (n) =>
+    Math.round(n * d)
+      .toString(16)
+      .padStart(2, "0");
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 

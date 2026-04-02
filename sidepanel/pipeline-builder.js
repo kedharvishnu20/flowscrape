@@ -9,6 +9,12 @@ const SK = { PIPELINE: "fs_active_pipeline" };
 
 // ── Step Registry ─────────────────────────────────────────────────────────────
 const STEP_REGISTRY = {
+  WEBSITE: {
+    icon: "🕸️",
+    cat: "Action",
+    desc: "Open website",
+    def: { url: "https://", wait: true },
+  },
   NAVIGATE: {
     icon: "🌐",
     cat: "Action",
@@ -104,6 +110,22 @@ const STEP_REGISTRY = {
     desc: "Export results",
     def: { format: "csv" },
   },
+  API: {
+    icon: "🧩",
+    cat: "Data",
+    desc: "Call API endpoint",
+    def: {
+      url: "https://api.example.com/resource",
+      method: "GET",
+      headers: '{"Accept":"application/json"}',
+      body: "",
+      timeoutMs: 15000,
+      responseType: "auto",
+      storeAs: "api",
+      failOnHttpError: true,
+      exposeBodyAsExtracted: false,
+    },
+  },
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -113,12 +135,29 @@ let _insertCtx = { index: -1, parentId: "", branchKey: "" };
 let _runState = { active: false, timer: null, startTs: 0, runId: null };
 let _dragSourceId = null;
 let _keyListening = false;
+let _boardState = {
+  scale: 1,
+  x: 24,
+  y: 24,
+  minScale: 0.35,
+  maxScale: 2.6,
+  panning: false,
+  startX: 0,
+  startY: 0,
+  originX: 0,
+  originY: 0,
+  fittedOnce: false,
+};
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const elCanvas = document.getElementById("pipeline-canvas");
 const elPalette = document.getElementById("step-palette-overlay");
 const elPaletteSearch = document.getElementById("palette-search");
 const elPaletteContent = document.getElementById("palette-content");
+const elBoardViewport = document.getElementById("board-viewport");
+const elBoardStage = document.getElementById("board-stage");
+const elPipelineWires = document.getElementById("pipeline-wires");
+const elBoardZoomLabel = document.getElementById("board-zoom-label");
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
@@ -126,6 +165,7 @@ async function init() {
   bindGlobalControls();
   bindPalette();
   bindDelegatedEvents();
+  initBoardSurface();
 
   const { [SK.PIPELINE]: saved } = await chrome.storage.local.get(SK.PIPELINE);
   if (saved?.steps) _pipeline = saved;
@@ -180,6 +220,7 @@ function bindGlobalControls() {
     .addEventListener("click", () => {
       _pipeline.steps = [];
       _expandedNodeId = null;
+      _boardState.fittedOnce = false;
       saveState();
       renderPipeline();
     });
@@ -384,6 +425,292 @@ function stopRunUI() {
     .forEach((n) => n.classList.remove("running"));
 }
 
+// ── Board surface (fabric-style pan/zoom + wires) ───────────────────────────
+function initBoardSurface() {
+  if (!elBoardViewport || !elBoardStage) return;
+
+  document
+    .getElementById("btn-board-zoom-in")
+    ?.addEventListener("click", () => {
+      const cx = elBoardViewport.clientWidth / 2;
+      const cy = elBoardViewport.clientHeight / 2;
+      _zoomBoard(1.15, cx, cy);
+    });
+  document
+    .getElementById("btn-board-zoom-out")
+    ?.addEventListener("click", () => {
+      const cx = elBoardViewport.clientWidth / 2;
+      const cy = elBoardViewport.clientHeight / 2;
+      _zoomBoard(1 / 1.15, cx, cy);
+    });
+  document
+    .getElementById("btn-board-zoom-reset")
+    ?.addEventListener("click", () => {
+      _boardState.scale = 1;
+      _boardState.x = 24;
+      _boardState.y = 24;
+      _applyBoardTransform();
+    });
+  document.getElementById("btn-board-fit")?.addEventListener("click", () => {
+    _fitBoardToContent();
+  });
+
+  elBoardViewport.addEventListener(
+    "wheel",
+    (e) => {
+      if (!elBoardViewport) return;
+      if (!e.ctrlKey && !e.metaKey && !e.shiftKey) return;
+      e.preventDefault();
+      const rect = elBoardViewport.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      _zoomBoard(e.deltaY < 0 ? 1.12 : 1 / 1.12, cx, cy);
+    },
+    { passive: false },
+  );
+
+  elBoardViewport.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    const interactive =
+      e.target.closest(".node-card") ||
+      e.target.closest(".insert-step") ||
+      e.target.closest(".insert-inner") ||
+      e.target.closest("input,textarea,select,button,.btn");
+    if (interactive) return;
+    _boardState.panning = true;
+    _boardState.startX = e.clientX;
+    _boardState.startY = e.clientY;
+    _boardState.originX = _boardState.x;
+    _boardState.originY = _boardState.y;
+    elBoardViewport.classList.add("panning");
+    elBoardViewport.setPointerCapture(e.pointerId);
+  });
+
+  elBoardViewport.addEventListener("pointermove", (e) => {
+    if (!_boardState.panning) return;
+    _boardState.x = _boardState.originX + (e.clientX - _boardState.startX);
+    _boardState.y = _boardState.originY + (e.clientY - _boardState.startY);
+    _applyBoardTransform();
+  });
+
+  const stopPan = () => {
+    _boardState.panning = false;
+    elBoardViewport.classList.remove("panning");
+  };
+  elBoardViewport.addEventListener("pointerup", stopPan);
+  elBoardViewport.addEventListener("pointercancel", stopPan);
+  window.addEventListener("resize", () => _renderBoardWires());
+
+  _applyBoardTransform();
+}
+
+function _zoomBoard(factor, cx, cy) {
+  const prev = _boardState.scale;
+  const next = Math.min(
+    _boardState.maxScale,
+    Math.max(_boardState.minScale, prev * factor),
+  );
+  if (next === prev) return;
+
+  const localX = (cx - _boardState.x) / prev;
+  const localY = (cy - _boardState.y) / prev;
+  _boardState.scale = next;
+  _boardState.x = cx - localX * next;
+  _boardState.y = cy - localY * next;
+  _applyBoardTransform();
+}
+
+function _applyBoardTransform() {
+  if (!elBoardStage) return;
+  elBoardStage.style.transform = `translate(${_boardState.x}px, ${_boardState.y}px) scale(${_boardState.scale})`;
+  if (elBoardZoomLabel) {
+    elBoardZoomLabel.textContent = `${Math.round(_boardState.scale * 100)}%`;
+  }
+  _renderBoardWires();
+}
+
+function _fitBoardToContent() {
+  if (!elBoardViewport || !elCanvas) return;
+  const wrappers = Array.from(elCanvas.querySelectorAll(".node-wrapper"));
+  if (!wrappers.length) {
+    _boardState.scale = 1;
+    _boardState.x = 24;
+    _boardState.y = 24;
+    _applyBoardTransform();
+    return;
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  wrappers.forEach((w) => {
+    minX = Math.min(minX, w.offsetLeft);
+    minY = Math.min(minY, w.offsetTop);
+    maxX = Math.max(maxX, w.offsetLeft + w.offsetWidth);
+    maxY = Math.max(maxY, w.offsetTop + w.offsetHeight);
+  });
+
+  const boundsW = Math.max(1, maxX - minX);
+  const boundsH = Math.max(1, maxY - minY);
+  const pad = 120;
+  const vw = elBoardViewport.clientWidth;
+  const vh = elBoardViewport.clientHeight;
+  const fitScale = Math.min((vw - pad) / boundsW, (vh - pad) / boundsH, 1.12);
+
+  _boardState.scale = Math.min(
+    _boardState.maxScale,
+    Math.max(_boardState.minScale, fitScale),
+  );
+  _boardState.x =
+    (vw - boundsW * _boardState.scale) / 2 - minX * _boardState.scale;
+  _boardState.y =
+    (vh - boundsH * _boardState.scale) / 2 - minY * _boardState.scale;
+  _boardState.fittedOnce = true;
+  _applyBoardTransform();
+}
+
+function _collectPipelineLinks(steps, bucket = []) {
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const next = steps[i + 1];
+    if (next) bucket.push({ from: step.id, to: next.id, kind: "chain" });
+
+    if (
+      step.type === "LOOP" &&
+      Array.isArray(step.children) &&
+      step.children.length
+    ) {
+      bucket.push({ from: step.id, to: step.children[0].id, kind: "loop" });
+      _collectPipelineLinks(step.children, bucket);
+    }
+    if (step.type === "IF_ELSE") {
+      if (Array.isArray(step.ifBranch) && step.ifBranch.length) {
+        bucket.push({ from: step.id, to: step.ifBranch[0].id, kind: "if" });
+        _collectPipelineLinks(step.ifBranch, bucket);
+      }
+      if (Array.isArray(step.elseBranch) && step.elseBranch.length) {
+        bucket.push({ from: step.id, to: step.elseBranch[0].id, kind: "else" });
+        _collectPipelineLinks(step.elseBranch, bucket);
+      }
+    }
+  }
+  return bucket;
+}
+
+function _nodeAnchor(stepId, edge = "bottom") {
+  if (!elBoardStage) return null;
+  const port = document.querySelector(
+    `.node-wrapper[data-id="${stepId}"] .node-card .node-port.${edge === "bottom" ? "out" : "in"}`,
+  );
+  if (port) {
+    const stageRect = elBoardStage.getBoundingClientRect();
+    const r = port.getBoundingClientRect();
+    const x = (r.left + r.width / 2 - stageRect.left) / _boardState.scale;
+    const y = (r.top + r.height / 2 - stageRect.top) / _boardState.scale;
+    return { x, y };
+  }
+
+  const card = document.querySelector(
+    `.node-wrapper[data-id="${stepId}"] .node-card`,
+  );
+  if (!card) return null;
+  const stageRect = elBoardStage.getBoundingClientRect();
+  const r = card.getBoundingClientRect();
+  const x = (r.left + r.width / 2 - stageRect.left) / _boardState.scale;
+  const yRaw = edge === "bottom" ? r.bottom : r.top;
+  const y = (yRaw - stageRect.top) / _boardState.scale;
+  return { x, y };
+}
+
+function _buildWirePath(a, b, kind = "chain") {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const pull = Math.max(30, Math.abs(dy) * 0.45);
+
+  // For chain steps directly below each other, this creates a perfectly straight line or smooth S-curve.
+  const c1x = a.x;
+  const c1y = a.y + pull;
+  const c2x = b.x;
+  const c2y = b.y - pull;
+
+  return `M ${a.x.toFixed(2)} ${a.y.toFixed(2)} C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${b.x.toFixed(2)} ${b.y.toFixed(2)}`;
+}
+
+function _renderBoardWires() {
+  if (!elPipelineWires || !elCanvas || !elBoardViewport) return;
+  const links = _collectPipelineLinks(_pipeline.steps, []);
+
+  const paths = [
+    `<defs>
+      <marker id="wire-arrow-chain" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L6,3 L0,6 Z" fill="rgba(255, 255, 255, 0.4)"></path>
+      </marker>
+      <marker id="wire-arrow-loop" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L6,3 L0,6 Z" fill="rgba(129, 140, 248, 0.7)"></path>
+      </marker>
+      <marker id="wire-arrow-if" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L6,3 L0,6 Z" fill="rgba(74, 222, 128, 0.7)"></path>
+      </marker>
+      <marker id="wire-arrow-else" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L6,3 L0,6 Z" fill="rgba(251, 113, 133, 0.7)"></path>
+      </marker>
+    </defs>`,
+  ];
+
+  for (const link of links) {
+    const a = _nodeAnchor(link.from, "bottom");
+    const b = _nodeAnchor(link.to, "top");
+    if (!a || !b) continue;
+
+    const d = _buildWirePath(a, b, link.kind);
+    const klass =
+      link.kind === "chain" ? "wire-path" : `wire-path ${link.kind}`;
+    const markerId =
+      link.kind === "chain" ? "wire-arrow-chain" : `wire-arrow-${link.kind}`;
+    const dotClass =
+      link.kind === "chain" ? "wire-dot" : `wire-dot ${link.kind}`;
+
+    paths.push(
+      `<path class="wire-path-glow ${link.kind === "chain" ? "" : link.kind}" d="${d}"></path>`,
+    );
+    // Add the tracer path (hidden normally)
+    paths.push(
+      `<path class="wire-path-tracer hidden-tracer" data-to="${link.to}" d="${d}"></path>`,
+    );
+    paths.push(
+      `<path class="${klass}" d="${d}" marker-end="url(#${markerId})"></path>`,
+    );
+    paths.push(
+      `<circle class="${dotClass}" cx="${a.x.toFixed(2)}" cy="${a.y.toFixed(2)}" r="2.4"></circle>`,
+    );
+    paths.push(
+      `<circle class="${dotClass}" cx="${b.x.toFixed(2)}" cy="${b.y.toFixed(2)}" r="3.2"></circle>`,
+    );
+  }
+  elPipelineWires.innerHTML = paths.join("");
+}
+
+function _focusNodeOnBoard(card) {
+  if (!card || !elBoardViewport) return;
+  const vr = elBoardViewport.getBoundingClientRect();
+  const cr = card.getBoundingClientRect();
+  const margin = 80;
+
+  let dx = 0;
+  let dy = 0;
+  if (cr.left < vr.left + margin) dx = vr.left + margin - cr.left;
+  if (cr.right > vr.right - margin) dx = vr.right - margin - cr.right;
+  if (cr.top < vr.top + margin) dy = vr.top + margin - cr.top;
+  if (cr.bottom > vr.bottom - margin) dy = vr.bottom - margin - cr.bottom;
+
+  if (dx || dy) {
+    _boardState.x += dx;
+    _boardState.y += dy;
+    _applyBoardTransform();
+  }
+}
+
 // ── Palette ───────────────────────────────────────────────────────────────────
 function bindPalette() {
   document
@@ -504,6 +831,8 @@ function renderPipeline() {
     elCanvas.innerHTML = `<div class="empty-state"><div style="font-size:32px;margin-bottom:16px;">✨</div>
       <div>Start building your flow.</div>
       <button class="btn btn-primary" style="margin-top:16px;" data-action="open-palette" data-index="-1" data-parent-id="" data-branch="">+ Add First Step</button></div>`;
+    if (elPipelineWires) elPipelineWires.innerHTML = "";
+    _applyBoardTransform();
     return;
   }
   let html = `<div class="insert-step top-insert" data-action="open-palette" data-index="0" data-parent-id="" data-branch="">+</div>`;
@@ -513,18 +842,19 @@ function renderPipeline() {
   elCanvas.innerHTML = html;
   bindConfigInputs();
   bindDragAndDrop();
+  requestAnimationFrame(() => {
+    if (!_boardState.fittedOnce) _fitBoardToContent();
+    else _applyBoardTransform();
+  });
 }
 
 function renderStepNode(step, index, total, parentId, branchKey) {
   const reg = STEP_REGISTRY[step.type] || { icon: "?", desc: "" };
   const isExpanded = _expandedNodeId === step.id;
-  const isFirst = index === 0,
-    isLast = index === total - 1;
 
   let html = `<div class="node-wrapper" data-index="${index}" data-id="${step.id}" data-parent-id="${parentId}" data-branch="${branchKey}">`;
-  html += `<div class="flow-line ${isFirst && !parentId ? "top-line" : ""} ${isLast && !parentId ? "bottom-line" : ""}"></div>`;
-  html += `<div class="flow-line-animated"></div>`;
-  html += `<div class="node-card ${isExpanded ? "expanded" : ""}" style="border-left:4px solid var(--step-${step.type},#64748B);" draggable="true" data-drag-id="${step.id}">`;
+  html += `<div class="node-card ${isExpanded ? "expanded" : ""}" style="--node-step-color:var(--step-${step.type},#64748B);border-left:4px solid var(--node-step-color);" draggable="true" data-drag-id="${step.id}" data-step-type="${step.type}">`;
+  html += `<div class="node-port in" aria-hidden="true"></div>`;
   html += `<div class="node-header" data-action="toggle-expand" data-id="${step.id}">
     <div class="node-icon-box" style="background:var(--step-${step.type},#64748B);">${reg.icon}</div>
     <div class="node-title-group">
@@ -537,6 +867,7 @@ function renderStepNode(step, index, total, parentId, branchKey) {
     </div>
   </div>`;
   html += `<div class="node-config">${generateConfigHtml(step)}</div>`;
+  html += `<div class="node-port out" aria-hidden="true"></div>`;
   html += `</div>`; // end .node-card
 
   // LOOP container body
@@ -581,8 +912,12 @@ function renderStepNode(step, index, total, parentId, branchKey) {
 function getStepSubtitle(step) {
   const c = step.config;
   switch (step.type) {
+    case "WEBSITE":
+      return c.url || "No URL";
     case "NAVIGATE":
       return c.url || "No URL";
+    case "API":
+      return `${(c.method || "GET").toUpperCase()} ${c.url || "No URL"}`;
     case "CLICK":
       return c.selector
         ? `${c.all ? "All: " : ""}${c.selector}`
@@ -607,10 +942,59 @@ function generateConfigHtml(step) {
   const c = step.config;
   let html = "";
 
-  // ── NAVIGATE ──
-  if (step.type === "NAVIGATE") {
-    html += field(step, "url", "URL", "text", c.url || "");
+  // ── WEBSITE / NAVIGATE ──
+  if (step.type === "WEBSITE" || step.type === "NAVIGATE") {
+    html += field(
+      step,
+      "url",
+      step.type === "WEBSITE" ? "Website URL" : "URL",
+      "text",
+      c.url || "",
+    );
     html += toggle(step, "wait", "Wait for page load");
+    html += toggle(step, "optional", "optional");
+    return html;
+  }
+
+  // ── API ──
+  if (step.type === "API") {
+    html += field(step, "url", "API URL", "text", c.url || "");
+    html += `<label>Method</label><select id="cfg-${step.id}-method" data-id="${step.id}" data-key="method" class="cfg-bind" style="margin-bottom:8px;">
+      <option value="GET" ${(c.method || "GET") === "GET" ? "selected" : ""}>GET</option>
+      <option value="POST" ${c.method === "POST" ? "selected" : ""}>POST</option>
+      <option value="PUT" ${c.method === "PUT" ? "selected" : ""}>PUT</option>
+      <option value="PATCH" ${c.method === "PATCH" ? "selected" : ""}>PATCH</option>
+      <option value="DELETE" ${c.method === "DELETE" ? "selected" : ""}>DELETE</option>
+    </select>`;
+    html += `<label>Headers (JSON)</label>
+      <textarea id="cfg-${step.id}-headers" data-id="${step.id}" data-key="headers" class="cfg-bind" rows="3" style="margin-bottom:8px;">${esc(c.headers || '{"Accept":"application/json"}')}</textarea>`;
+    html += `<label>Body (JSON or text)</label>
+      <textarea id="cfg-${step.id}-body" data-id="${step.id}" data-key="body" class="cfg-bind" rows="3" style="margin-bottom:8px;">${esc(c.body || "")}</textarea>`;
+    html += field(
+      step,
+      "timeoutMs",
+      "Timeout (ms)",
+      "number",
+      c.timeoutMs ?? 15000,
+    );
+    html += `<label>Response Type</label><select id="cfg-${step.id}-responseType" data-id="${step.id}" data-key="responseType" class="cfg-bind" style="margin-bottom:8px;">
+      <option value="auto" ${(c.responseType || "auto") === "auto" ? "selected" : ""}>Auto</option>
+      <option value="json" ${c.responseType === "json" ? "selected" : ""}>JSON</option>
+      <option value="text" ${c.responseType === "text" ? "selected" : ""}>Text</option>
+    </select>`;
+    html += field(
+      step,
+      "storeAs",
+      "Store Result As",
+      "text",
+      c.storeAs || "api",
+    );
+    html += toggle(step, "failOnHttpError", "Fail on non-2xx status");
+    html += toggle(
+      step,
+      "exposeBodyAsExtracted",
+      "Merge JSON body into extracted context",
+    );
     html += toggle(step, "optional", "optional");
     return html;
   }
@@ -866,7 +1250,11 @@ function bindConfigInputs(container = document) {
       }
     });
 
-    if (newEl.type === "text" || newEl.type === "number") {
+    if (
+      newEl.type === "text" ||
+      newEl.type === "number" ||
+      newEl.tagName === "TEXTAREA"
+    ) {
       newEl.addEventListener("input", (e) => {
         const step = _findStepDeep(_pipeline.steps, e.target.dataset.id);
         if (!step) return;
@@ -1310,18 +1698,42 @@ function listenToSystem() {
         document
           .querySelectorAll(".node-card")
           .forEach((n) => n.classList.remove("running", "success", "error"));
+
+        // Hide all previously active tracers
+        document.querySelectorAll(".wire-path-active-tracer").forEach((t) => {
+          t.classList.remove("wire-path-active-tracer");
+          t.classList.add("hidden-tracer");
+        });
+
         const active = document.querySelector(
           `.node-wrapper[data-id="${info.currentStepId}"] .node-card`,
         );
         if (active) {
           active.classList.add("running");
-          active.scrollIntoView({ behavior: "smooth", block: "center" });
+
+          // Light up tracer pointing TO this node
+          const tracer = document.querySelector(
+            `path.hidden-tracer[data-to="${info.currentStepId}"]`,
+          );
+          if (tracer) {
+            tracer.classList.remove("hidden-tracer");
+            tracer.classList.add("wire-path-active-tracer");
+          }
+
+          _focusNodeOnBoard(active);
         }
         document.getElementById("mon-state").textContent = "Running...";
         document.getElementById("mon-state").style.color = "var(--text-main)";
       }
       if (info.state === "completed" || info.state === "stopped") {
         stopRunUI();
+
+        // Hide all active tracers on stop/complete
+        document.querySelectorAll(".wire-path-active-tracer").forEach((t) => {
+          t.classList.remove("wire-path-active-tracer");
+          t.classList.add("hidden-tracer");
+        });
+
         document.getElementById("mon-state").textContent =
           info.state === "completed" ? "Success" : "Stopped";
         document.getElementById("mon-state").style.color =

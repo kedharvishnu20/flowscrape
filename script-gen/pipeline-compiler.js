@@ -26,15 +26,30 @@ export function compilePipeline(recipe) {
     return { ast: null, errors: ['Pipeline must have a steps array'] };
   }
 
-  const steps = recipe.steps.map((step, i) => {
-    if (!step.type) errors.push(`Step ${i + 1} is missing a type`);
-    return {
-      id:     step.id ?? `step_${i + 1}`,
-      type:   (step.type ?? '').toUpperCase(),
-      label:  step.label ?? step.type ?? `Step ${i + 1}`,
-      config: step.config ?? {},
-    };
-  });
+  const mapSteps = (stepList) => {
+    if (!Array.isArray(stepList)) return [];
+    return stepList.map((step, i) => {
+      if (!step.type) errors.push(`Step ${i + 1} is missing a type`);
+      const mapped = {
+        id:     step.id ?? `step_${i + 1}`,
+        type:   (step.type ?? '').toUpperCase(),
+        label:  step.label ?? step.type ?? `Step ${i + 1}`,
+        config: step.config ?? {},
+      };
+      if (Array.isArray(step.children)) {
+        mapped.children = mapSteps(step.children);
+      }
+      if (Array.isArray(step.ifBranch)) {
+        mapped.ifBranch = mapSteps(step.ifBranch);
+      }
+      if (Array.isArray(step.elseBranch)) {
+        mapped.elseBranch = mapSteps(step.elseBranch);
+      }
+      return mapped;
+    });
+  };
+
+  const steps = mapSteps(recipe.steps);
 
   const ast = {
     name:         recipe.name ?? 'Untitled',

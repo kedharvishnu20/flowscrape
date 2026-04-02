@@ -1,32 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FlowScrape v3</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
     :root {
-      --bg-void:   #05050A;
-      --bg-base:   #0B0D14;
+      --bg-void: #05050A;
+      --bg-base: #0B0D14;
       --bg-raised: #12141F;
-      --bg-hover:  #1A1D2A;
+      --bg-hover: #1A1D2A;
       --bg-border: #23273A;
-      
+
       --text-main: #F8FAFC;
       --text-muted: #94A3B8;
-      --text-dim:  #64748B;
-      
-      --accent:    #6366F1;
+      --text-dim: #64748B;
+
+      --accent: #6366F1;
       --accent-glow: rgba(99, 102, 241, 0.2);
-      
-      --green:     #22C55E;
-      --red:       #EF4444;
-      --yellow:    #EAB308;
+
+      --green: #22C55E;
+      --red: #EF4444;
+      --yellow: #EAB308;
 
       /* Step Type Colors */
       --step-NAVIGATE: #3B82F6;
@@ -45,13 +54,16 @@
       --step-KEYBOARD: #78716C;
       --step-DRAG_DROP: #D946EF;
       --step-EXPORT: #22C55E;
+      --step-WEBSITE: #38BDF8;
+      --step-API: #06B6D4;
 
       --radius: 8px;
       --radius-sm: 4px;
-      --shadow-fly: 0 10px 40px -10px rgba(0,0,0,0.5);
+      --shadow-fly: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
     }
 
-    html, body {
+    html,
+    body {
       height: 100%;
       background: var(--bg-void);
       color: var(--text-main);
@@ -62,276 +74,1113 @@
     }
 
     /* Scrollbars */
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--bg-border); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--bg-border);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-dim);
+    }
 
     /* Buttons */
     .btn {
-      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-      padding: 6px 12px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 500;
-      cursor: pointer; transition: all 0.2s; border: 1px solid var(--bg-border); background: var(--bg-raised); color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: 1px solid var(--bg-border);
+      background: var(--bg-raised);
+      color: var(--text-main);
     }
-    .btn:hover { background: var(--bg-hover); border-color: var(--text-dim); }
-    .btn-primary { background: var(--accent); border-color: var(--accent); color: white; box-shadow: 0 2px 10px var(--accent-glow); }
-    .btn-primary:hover { background: #818CF8; border-color: #818CF8; filter: brightness(1.1); }
-    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
-    .btn-danger { color: var(--red); border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.05); }
-    .btn-danger:hover { background: rgba(239, 68, 68, 0.15); }
-    .btn-icon { width: 24px; height: 24px; padding: 0; background: transparent; border: none; color: var(--text-muted); display: flex; align-items: center; justify-content: center; border-radius: 4px; cursor: pointer; transition: 0.2s; }
-    .btn-icon:hover { background: var(--bg-border); color: var(--text-main); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--text-dim);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+      box-shadow: 0 2px 10px var(--accent-glow);
+    }
+
+    .btn-primary:hover {
+      background: #818CF8;
+      border-color: #818CF8;
+      filter: brightness(1.1);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .btn-danger {
+      color: var(--red);
+      border-color: rgba(239, 68, 68, 0.3);
+      background: rgba(239, 68, 68, 0.05);
+    }
+
+    .btn-danger:hover {
+      background: rgba(239, 68, 68, 0.15);
+    }
+
+    .btn-icon {
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    .btn-icon:hover {
+      background: var(--bg-border);
+      color: var(--text-main);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
 
     /* Typography & Utilities */
-    h1, h2, h3 { font-weight: 600; color: var(--text-main); margin-bottom: 8px; }
-    p { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; }
-    .mono { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
-    .flex { display: flex; } .items-center { align-items: center; } .gap-2 { gap: 8px; } .justify-between { justify-content: space-between; } .w-full { width: 100%; }
-    .hidden { display: none !important; }
+    h1,
+    h2,
+    h3 {
+      font-weight: 600;
+      color: var(--text-main);
+      margin-bottom: 8px;
+    }
+
+    p {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+    }
+
+    .flex {
+      display: flex;
+    }
+
+    .items-center {
+      align-items: center;
+    }
+
+    .gap-2 {
+      gap: 8px;
+    }
+
+    .justify-between {
+      justify-content: space-between;
+    }
+
+    .w-full {
+      width: 100%;
+    }
+
+    .hidden {
+      display: none !important;
+    }
 
     /* Inputs */
-    input[type=text], input[type=number], input[type=url], select, textarea {
-      width: 100%; background: var(--bg-void); border: 1px solid var(--bg-border); color: var(--text-main);
-      border-radius: var(--radius-sm); padding: 6px 10px; font-size: 12px; font-family: inherit; outline: none; transition: border 0.2s, box-shadow 0.2s;
+    input[type=text],
+    input[type=number],
+    input[type=url],
+    select,
+    textarea {
+      width: 100%;
+      background: var(--bg-void);
+      border: 1px solid var(--bg-border);
+      color: var(--text-main);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+      transition: border 0.2s, box-shadow 0.2s;
     }
-    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
-    label { display: block; font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; margin-top: 10px;}
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
 
     /* Layout */
-    #app { display: flex; flex-direction: column; height: 100vh; position: relative; }
-    
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      position: relative;
+    }
+
     /* Header (Databricks style) */
     #header {
-       display: flex; align-items: center; padding: 12px 16px; background: var(--bg-raised); border-bottom: 1px solid var(--bg-border); z-index: 10; flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      padding: 12px 16px;
+      background: var(--bg-raised);
+      border-bottom: 1px solid var(--bg-border);
+      z-index: 10;
+      flex-shrink: 0;
     }
-    .logo-container { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; letter-spacing: -0.5px; }
-    .logo-bolt { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), #D946EF); display: flex; align-items: center; justify-content: center; font-size: 14px; }
-    
-    .nav-pills { display: flex; gap: 4px; background: var(--bg-base); padding: 4px; border-radius: 6px; border: 1px solid var(--bg-border); margin-left: auto; }
-    .nav-pill { padding: 4px 12px; font-size: 12px; font-weight: 500; color: var(--text-muted); cursor: pointer; border-radius: 4px; transition: all 0.2s; }
-    .nav-pill:hover { color: var(--text-main); background: var(--bg-hover); }
-    .nav-pill.active { background: var(--bg-raised); color: var(--text-main); box-shadow: 0 1px 3px rgba(0,0,0,0.5); border: 1px solid var(--bg-border); }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: -0.5px;
+    }
+
+    .logo-bolt {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, var(--accent), #D946EF);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    .nav-pills {
+      display: flex;
+      gap: 4px;
+      background: var(--bg-base);
+      padding: 4px;
+      border-radius: 6px;
+      border: 1px solid var(--bg-border);
+      margin-left: auto;
+    }
+
+    .nav-pill {
+      padding: 4px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+
+    .nav-pill:hover {
+      color: var(--text-main);
+      background: var(--bg-hover);
+    }
+
+    .nav-pill.active {
+      background: var(--bg-raised);
+      color: var(--text-main);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+      border: 1px solid var(--bg-border);
+    }
 
     /* Run Bar */
-    #run-bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--bg-base); border-bottom: 1px solid var(--bg-border); z-index: 9; }
-    
+    #run-bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      background: var(--bg-base);
+      border-bottom: 1px solid var(--bg-border);
+      z-index: 9;
+    }
+
     /* View Container */
-    #views { flex: 1; position: relative; overflow: hidden; background: var(--bg-base); }
-    .view { position: absolute; inset: 0; overflow-y: auto; display: none; padding: 16px; flex-direction: column; }
-    .view.active { display: flex; }
+    #views {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background: var(--bg-base);
+    }
+
+    .view {
+      position: absolute;
+      inset: 0;
+      overflow-y: auto;
+      display: none;
+      padding: 16px;
+      flex-direction: column;
+    }
+
+    .view.active {
+      display: flex;
+    }
 
     /* =========================================================
-       PIPELINE BUILDER CANVAS (The Core Innovation) 
+       PREMIUM PRODUCTION UI
        ========================================================= */
+    #view-pipeline {
+      background-image:
+        radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+        linear-gradient(140deg, #0b0c10 0%, #161b22 55%, #0f111a 100%);
+      background-size: 24px 24px, 100% 100%;
+      scroll-behavior: smooth;
+      overflow: hidden;
+      padding: 10px;
+    }
+
+    #board-toolbar {
+      position: relative;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px;
+      margin-bottom: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      /* Pro border */
+      border-radius: 10px;
+      background: rgba(16, 21, 31, 0.85);
+      /* Deep slate glass */
+      backdrop-filter: blur(12px);
+      box-shadow: 0 12px 24px -16px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+
+    #board-viewport {
+      position: relative;
+      flex: 1;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      /* Softer edge */
+      border-radius: 12px;
+      overflow: hidden;
+      min-height: 520px;
+      cursor: grab;
+      box-shadow: inset 0 4px 24px -10px rgba(0, 0, 0, 0.5);
+      /* Inner depth */
+      /* No repeating linear gradient - keeping it clean */
+    }
+
+    #board-viewport.panning {
+      cursor: grabbing;
+    }
+
+    #board-stage {
+      position: absolute;
+      inset: 0;
+      min-width: 1400px;
+      min-height: 1200px;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+
+    #pipeline-wires {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+      overflow: visible;
+    }
+
+    .wire-path {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.4);
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    /* Invisible click target or subtle background line */
+    .wire-path-glow {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.02);
+      stroke-width: 6;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      /* Remove blur so it stays crisp */
+    }
+
+    .hidden-tracer {
+      display: none;
+    }
+
+    /* Animated execution tracer */
+    .wire-path-active-tracer {
+      display: block !important;
+      fill: none;
+      stroke: #4ADE80;
+      /* Vibrant Green Flow */
+      stroke-width: 3.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 8 16;
+      animation: tracerFlow 0.8s linear infinite;
+      filter: drop-shadow(0 0 6px rgba(74, 222, 128, 0.8));
+    }
+
+    @keyframes tracerFlow {
+      0% {
+        stroke-dashoffset: 24;
+      }
+
+      100% {
+        stroke-dashoffset: 0;
+      }
+    }
+
+    .wire-path.loop {
+      stroke: rgba(129, 140, 248, 0.7);
+    }
+
+    .wire-path.if {
+      stroke: rgba(74, 222, 128, 0.7);
+    }
+
+    .wire-path.else {
+      stroke: rgba(251, 113, 133, 0.7);
+    }
+
+    .wire-dot {
+      fill: rgba(255, 255, 255, 0.8);
+    }
+
+    .wire-dot.loop {
+      fill: #818CF8;
+    }
+
+    .wire-dot.if {
+      fill: #4ADE80;
+    }
+
+    .wire-dot.else {
+      fill: #FB7185;
+    }
+
     #pipeline-canvas {
       position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 0 0 60px 0;
-      gap: 0;
+      padding: 24px 60px 80px;
+      gap: 8px;
       min-height: 100%;
+      min-width: 920px;
+      z-index: 2;
     }
 
-    /* Background structural grid/dot pattern */
-    #view-pipeline {
-      background-image: radial-gradient(var(--bg-border) 1px, transparent 1px);
-      background-size: 20px 20px;
-      scroll-behavior: smooth;
+    .empty-state {
+      text-align: center;
+      color: var(--text-dim);
+      padding: 40px 20px;
+      width: 100%;
     }
-
-    .empty-state { text-align: center; color: var(--text-dim); padding: 40px 20px; width: 100%; }
 
     /* Node Wrapper (holds insert button + card) */
     .node-wrapper {
-      display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 360px; position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 380px;
+      position: relative;
     }
-    
+
     /* Insert Step Button between nodes */
     .insert-step {
-      width: 24px; height: 24px; border-radius: 50%; background: var(--bg-raised); border: 1px solid var(--bg-border);
-      display: flex; align-items: center; justify-content: center; color: var(--text-dim); font-size: 14px; cursor: pointer;
-      position: relative; z-index: 3; transition: all 0.2s; margin-top: -12px; margin-bottom: -12px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #181d26;
+      /* match card */
+      border: 1px dashed rgba(255, 255, 255, 0.15);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      font-size: 14px;
+      cursor: pointer;
+      position: relative;
+      z-index: 3;
+      transition: all 0.2s;
+      margin-top: 14px;
+      margin-bottom: 14px;
     }
-    .insert-step:hover { background: var(--accent); color: white; border-color: var(--accent); transform: scale(1.2); }
-    .node-wrapper:first-child .insert-step.top-insert { margin-top: 0; margin-bottom: 12px; }
 
-    /* The vertical connecting line */
-    .flow-line {
-      position: absolute; width: 2px; top: -20px; bottom: -20px; left: 50%; transform: translateX(-50%);
-      background: var(--bg-border); z-index: 1;
+    .insert-step:hover {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+      transform: scale(1.15);
+      border-style: solid;
     }
-    .node-wrapper:first-child .flow-line.top-line { display: none; }
-    .node-wrapper:last-child .flow-line.bottom-line { display: none; }
 
-    .flow-line-animated {
-        position: absolute; width: 2px; top: -20px; bottom: 0; left: 50%; transform: translateX(-50%);
-        z-index: 2; opacity: 0; transition: opacity 0.3s;
-        background: transparent;
-        overflow: hidden;
+    .node-wrapper:first-child .insert-step.top-insert {
+      margin-top: 0;
+      margin-bottom: 20px;
     }
-    .flow-line-animated::after {
-        content: ''; position: absolute; width: 6px; height: 6px;
-        border-radius: 50%; background: var(--accent); left: -2px; top: 0;
-        animation: flowDot 1.5s linear infinite;
-    }
-    @keyframes flowDot { 0% { top: 0; opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
 
-    /* The Node Card — Clean, solid, no glassmorphism */
+    /* The Node Card — Clean, solid, premium production UI */
     .node-card {
       width: 100%;
-      background: var(--bg-raised);
-      border: 1px solid var(--bg-border);
-      border-radius: var(--radius);
+      background: #181d26;
+      /* Deeper space gray */
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      /* Sharper pro radius */
       position: relative;
       z-index: 4;
-      transition: all 0.2s, border-color 0.3s;
+      transition: all 0.2s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.3s;
       cursor: grab;
+      overflow: visible;
+      box-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      /* Pro elevation */
     }
-    .node-card:active { cursor: grabbing; transform: scale(0.98); }
-    .node-card:hover { border-color: var(--text-dim); }
+
+    .node-port {
+      position: absolute;
+      left: 50%;
+      width: 14px;
+      height: 14px;
+      transform: translateX(-50%);
+      border-radius: 50%;
+      border: 2px solid var(--node-step-color, var(--bg-border));
+      background: #0f111a;
+      box-shadow:
+        0 0 0 3px rgba(15, 17, 26, 1),
+        /* Cutout look against the card/bg */
+        0 0 16px -8px var(--node-step-color, #64748B);
+      z-index: 6;
+      pointer-events: none;
+      transition: all 0.3s ease;
+    }
+
+    .node-port::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 4px;
+      height: 4px;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: var(--node-step-color, #64748B);
+      transition: all 0.3s ease;
+    }
+
+    .node-port.in {
+      top: -8px;
+    }
+
+    .node-port.out {
+      bottom: -8px;
+    }
+
+    .node-card:active {
+      cursor: grabbing;
+      transform: scale(0.98);
+      box-shadow: 0 2px 6px -1px rgba(0, 0, 0, 0.6);
+    }
+
+    .node-card:hover {
+      border-color: rgba(255, 255, 255, 0.15);
+      box-shadow: 0 8px 16px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      /* Lift on hover */
+    }
 
     .node-header {
-      padding: 12px; display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 100%);
+      /* Subtle specular highlight */
+      border-top-left-radius: 10px;
+      border-top-right-radius: 10px;
     }
+
     .node-icon-box {
-      width: 32px; height: 32px; border-radius: 6px; display: flex; align-items: center; justify-content: center;
-      font-size: 14px; flex-shrink: 0; background: rgba(255,255,255,0.05); color: white;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.05);
+      /* Pro box for icon */
+      color: white;
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
     }
-    .node-title-group { flex: 1; min-width: 0; }
-    .node-title { font-size: 13px; font-weight: 600; color: var(--text-main); display: flex; align-items: center; gap: 6px; }
-    .node-subtitle { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top:2px; }
-    
-    .node-status-icon { font-size: 12px; display: none; }
+
+    .node-title-group {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .node-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .node-subtitle {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      /* Variables stand out */
+    }
+
+    .node-status-icon {
+      font-size: 12px;
+      display: none;
+    }
 
     /* Node State Styles applied via JS */
-    .node-card.running { border-color: var(--accent); box-shadow: 0 0 15px var(--accent-glow); animation: pulseGlow 2s infinite; }
-    .node-card.running .node-status-icon.running-spinner { display: inline-block; animation: spin 1s linear infinite; }
-    .node-card.running .flow-line-animated { opacity: 1; height: calc(100% + 40px); top: -20px; }
-    
-    .node-card.success { border-color: var(--green); }
-    .node-card.success .node-status-icon.success-mark { display: inline-block; color: var(--green); }
-    
-    .node-card.error { border-color: var(--red); }
-    .node-card.error .node-status-icon.error-mark { display: inline-block; color: var(--red); }
+    @keyframes cardPulseGlow {
+      0% {
+        box-shadow: 0 0 0 0px rgba(74, 222, 128, 0.15), 0 4px 12px -2px rgba(0, 0, 0, 0.5);
+        border-color: rgba(74, 222, 128, 0.2);
+      }
 
-    @keyframes pulseGlow { 0% { box-shadow: 0 0 0 0 var(--accent-glow); } 70% { box-shadow: 0 0 0 10px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
-    @keyframes spin { 100% { transform: rotate(360deg); } }
+      50% {
+        box-shadow: 0 0 0 4px rgba(74, 222, 128, 0), 0 0 20px 2px rgba(74, 222, 128, 0.3);
+        border-color: rgba(74, 222, 128, 0.6);
+      }
 
-    .node-actions { display: flex; gap: 4px; opacity: 0.2; transition: opacity 0.2s; }
-    .node-card:hover .node-actions { opacity: 1; }
+      100% {
+        box-shadow: 0 0 0 0px rgba(74, 222, 128, 0), 0 4px 12px -2px rgba(0, 0, 0, 0.5);
+        border-color: rgba(74, 222, 128, 0.2);
+      }
+    }
+
+    .node-card.running {
+      animation: cardPulseGlow 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      z-index: 10;
+    }
+
+    .node-card.running .node-status-icon.running-spinner {
+      display: inline-block;
+      animation: spin 1s linear infinite;
+    }
+
+    .node-card.running .node-port {
+      background: var(--green);
+      border-color: rgba(255, 255, 255, 0.8);
+      box-shadow:
+        0 0 0 3px rgba(15, 17, 26, 1),
+        0 0 16px 2px rgba(74, 222, 128, 0.8);
+      transform: translateX(-50%) scale(1.15);
+    }
+
+    .node-card.running .node-port::after {
+      background: #0f111a;
+      /* Inverse the dot for contrast */
+    }
+
+    .node-card.success {
+      border-color: var(--green);
+    }
+
+    .node-card.success .node-status-icon.success-mark {
+      display: inline-block;
+      color: var(--green);
+    }
+
+    .node-card.error {
+      border-color: var(--red);
+    }
+
+    .node-card.error .node-status-icon.error-mark {
+      display: inline-block;
+      color: var(--red);
+    }
+
+    @keyframes pulseGlow {
+      0% {
+        box-shadow: 0 0 0 0 var(--accent-glow);
+      }
+
+      70% {
+        box-shadow: 0 0 0 10px transparent;
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 transparent;
+      }
+    }
+
+    @keyframes spin {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    .node-actions {
+      display: flex;
+      gap: 4px;
+      opacity: 0.2;
+      transition: opacity 0.2s;
+    }
+
+    .node-card:hover .node-actions {
+      opacity: 1;
+    }
 
     /* Node Config Body (Expanding panel) */
     .node-config {
-      padding: 0 12px 12px 12px; display: none; border-top: 1px solid var(--bg-border); margin-top: 4px; padding-top: 12px;
+      padding: 0 12px 12px 12px;
+      display: none;
+      border-top: 1px solid var(--bg-border);
+      margin-top: 4px;
+      padding-top: 12px;
       cursor: default;
     }
-    .node-card.expanded .node-config { display: block; }
-    .node-config-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-end;}
-    .node-config-row > div { flex: 1; }
+
+    .node-card.expanded .node-config {
+      display: block;
+    }
+
+    .node-config-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: flex-end;
+    }
+
+    .node-config-row>div {
+      flex: 1;
+    }
 
     /* Palette Drawer (Step Picker) */
     #step-palette-overlay {
-      position: absolute; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; display: none; align-items: flex-end;
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      z-index: 100;
+      display: none;
+      align-items: flex-end;
     }
-    #step-palette-overlay.open { display: flex; }
+
+    #step-palette-overlay.open {
+      display: flex;
+    }
+
     #step-palette {
-      background: var(--bg-raised); width: 100%; border-top-left-radius: 12px; border-top-right-radius: 12px; border-top: 1px solid var(--bg-border);
-      padding: 16px; display: flex; flex-direction: column; max-height: 85%; overflow-y: auto; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      background: var(--bg-raised);
+      width: 100%;
+      border-top-left-radius: 12px;
+      border-top-right-radius: 12px;
+      border-top: 1px solid var(--bg-border);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      max-height: 85%;
+      overflow-y: auto;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    #step-palette-overlay.open #step-palette { transform: translateY(0); }
-    .palette-search { margin-bottom: 12px; }
-    .palette-category { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; margin: 12px 0 8px 0; border-bottom: 1px solid var(--bg-border); padding-bottom: 4px; }
-    .palette-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+    #step-palette-overlay.open #step-palette {
+      transform: translateY(0);
+    }
+
+    .palette-search {
+      margin-bottom: 12px;
+    }
+
+    .palette-category {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      margin: 12px 0 8px 0;
+      border-bottom: 1px solid var(--bg-border);
+      padding-bottom: 4px;
+    }
+
+    .palette-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
     .palette-item {
-      display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 4px; background: var(--bg-base); border: 1px solid var(--bg-border);
-      border-radius: var(--radius-sm); cursor: pointer; transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 4px;
+      background: var(--bg-base);
+      border: 1px solid var(--bg-border);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.2s;
     }
-    .palette-item:hover { background: var(--bg-hover); border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-    .palette-item-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: white;}
-    .palette-item-label { font-size: 10px; font-weight: 500; text-align: center; }
+
+    .palette-item:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .palette-item-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: white;
+    }
+
+    .palette-item-label {
+      font-size: 10px;
+      font-weight: 500;
+      text-align: center;
+    }
 
     /* =========================================================
        MONITOR DASHBOARD
        ========================================================= */
-    .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 16px; }
-    .metric-card { background: var(--bg-raised); border: 1px solid var(--bg-border); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; }
-    .metric-val { font-size: 24px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
-    .metric-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-    .log-container { flex: 1; min-height: 200px; background: var(--bg-void); border: 1px solid var(--bg-border); border-radius: var(--radius); padding: 8px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px; display: flex; flex-direction: column; gap: 4px; }
-    .log-entry { display: flex; gap: 8px; padding: 2px 4px; border-radius: 2px; }
-    .log-ts { color: var(--text-dim); white-space: nowrap; }
-    .log-msg { color: var(--text-muted); word-break: break-all; }
-    .log-entry.error-log .log-msg { color: var(--red); }
-    .log-entry.warn-log .log-msg { color: var(--yellow); }
-    .log-entry.info-log .log-msg { color: var(--text-main); }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .metric-card {
+      background: var(--bg-raised);
+      border: 1px solid var(--bg-border);
+      border-radius: var(--radius);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .metric-val {
+      font-size: 24px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .log-container {
+      flex: 1;
+      min-height: 200px;
+      background: var(--bg-void);
+      border: 1px solid var(--bg-border);
+      border-radius: var(--radius);
+      padding: 8px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .log-entry {
+      display: flex;
+      gap: 8px;
+      padding: 2px 4px;
+      border-radius: 2px;
+    }
+
+    .log-ts {
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+
+    .log-msg {
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+
+    .log-entry.error-log .log-msg {
+      color: var(--red);
+    }
+
+    .log-entry.warn-log .log-msg {
+      color: var(--yellow);
+    }
+
+    .log-entry.info-log .log-msg {
+      color: var(--text-main);
+    }
 
     /* ProgressBar */
-    .progress-track { height: 6px; background: var(--bg-border); border-radius: 3px; overflow: hidden; margin-top: 10px; }
-    .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #D946EF); width: 0%; transition: width 0.3s; }
+    .progress-track {
+      height: 6px;
+      background: var(--bg-border);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 10px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #D946EF);
+      width: 0%;
+      transition: width 0.3s;
+    }
 
     /* =========================================================
        CONFIG ACCORDIONS
        ========================================================= */
-    .accordion-section { border: 1px solid var(--bg-border); border-radius: var(--radius); margin-bottom: 8px; background: var(--bg-raised); overflow: hidden; }
-    .accordion-header { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-weight: 500; font-size: 13px; }
-    .accordion-header:hover { background: var(--bg-hover); }
-    .accordion-content { padding: 16px; display: none; border-top: 1px solid var(--bg-border); background: var(--bg-base); }
-    .accordion-section.open .accordion-content { display: block; }
-    .accordion-section.open .accordion-header { background: var(--bg-hover); }
+    .accordion-section {
+      border: 1px solid var(--bg-border);
+      border-radius: var(--radius);
+      margin-bottom: 8px;
+      background: var(--bg-raised);
+      overflow: hidden;
+    }
 
-    .toggle-wrap { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; color: var(--text-main); margin-bottom: 8px; margin-top: 8px; }
-    .toggle-switch { width: 32px; height: 18px; border-radius: 9px; background: var(--bg-border); position: relative; display: inline-block; vertical-align: middle; transition: background 0.3s; pointer-events: none;}
-    .toggle-switch::after { content: ''; position: absolute; left: 2px; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: white; transition: transform 0.3s; }
-    input[type=checkbox]:checked + .toggle-switch { background: var(--accent); }
-    input[type=checkbox]:checked + .toggle-switch::after { transform: translateX(14px); }
-    .toggle-wrap input[type=checkbox] { display: none; }
-    
-    .overlay-status-badge { background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 10px; font-size: 10px;}
-    .mapping-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; border: 1px solid var(--bg-border); border-radius: 4px; overflow: hidden;}
-    .mapping-table th { background: var(--bg-raised); padding: 6px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); text-align: left; }
-    .mapping-table td { padding: 4px; border-bottom: 1px solid var(--bg-border); border-top: 1px solid var(--bg-border); }
-    .mapping-table input { border: none !important; border-radius: 0; padding: 4px; background: transparent; }
-    .mapping-table input:focus { box-shadow: none; border-bottom: 1px solid var(--accent) !important; }
-    
+    .accordion-header {
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 13px;
+    }
+
+    .accordion-header:hover {
+      background: var(--bg-hover);
+    }
+
+    .accordion-content {
+      padding: 16px;
+      display: none;
+      border-top: 1px solid var(--bg-border);
+      background: var(--bg-base);
+    }
+
+    .accordion-section.open .accordion-content {
+      display: block;
+    }
+
+    .accordion-section.open .accordion-header {
+      background: var(--bg-hover);
+    }
+
+    .toggle-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-main);
+      margin-bottom: 8px;
+      margin-top: 8px;
+    }
+
+    .toggle-switch {
+      width: 32px;
+      height: 18px;
+      border-radius: 9px;
+      background: var(--bg-border);
+      position: relative;
+      display: inline-block;
+      vertical-align: middle;
+      transition: background 0.3s;
+      pointer-events: none;
+    }
+
+    .toggle-switch::after {
+      content: '';
+      position: absolute;
+      left: 2px;
+      top: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: white;
+      transition: transform 0.3s;
+    }
+
+    input[type=checkbox]:checked+.toggle-switch {
+      background: var(--accent);
+    }
+
+    input[type=checkbox]:checked+.toggle-switch::after {
+      transform: translateX(14px);
+    }
+
+    .toggle-wrap input[type=checkbox] {
+      display: none;
+    }
+
+    .overlay-status-badge {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 2px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+    }
+
+    .mapping-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      margin-top: 8px;
+      border: 1px solid var(--bg-border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .mapping-table th {
+      background: var(--bg-raised);
+      padding: 6px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      text-align: left;
+    }
+
+    .mapping-table td {
+      padding: 4px;
+      border-bottom: 1px solid var(--bg-border);
+      border-top: 1px solid var(--bg-border);
+    }
+
+    .mapping-table input {
+      border: none !important;
+      border-radius: 0;
+      padding: 4px;
+      background: transparent;
+    }
+
+    .mapping-table input:focus {
+      box-shadow: none;
+      border-bottom: 1px solid var(--accent) !important;
+    }
+
     /* Resume banner */
     .resume-banner {
-      background: var(--bg-raised); border: 1px solid var(--accent);
-      border-radius: var(--radius); padding: 10px 16px; margin-bottom: 12px;
-      display: flex; align-items: center; justify-content: space-between;
-      font-size: 12px; color: var(--text-main); gap: 8px;
+      background: var(--bg-raised);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 10px 16px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-main);
+      gap: 8px;
     }
 
     /* =========================================================
        LOOP CONTAINER
        ========================================================= */
     .loop-body {
-      width: 100%; position: relative;
-      display: flex; flex-direction: column; align-items: center;
+      width: 100%;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
     }
+
     .loop-scope-bar {
-      position: absolute; left: 20px; top: 0; bottom: 0;
-      width: 3px; border-radius: 2px;
+      position: absolute;
+      left: 20px;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      border-radius: 2px;
       background: linear-gradient(180deg, var(--step-LOOP) 0%, transparent 100%);
       opacity: 0.5;
     }
+
     .loop-body-inner {
-      width: 100%; max-width: 340px; padding-left: 16px;
-      display: flex; flex-direction: column; align-items: center;
+      width: 100%;
+      max-width: 340px;
+      padding-left: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
     }
-    .loop-end-marker, .ifelse-end-marker {
-      display: flex; align-items: center; justify-content: center; gap: 6px;
-      width: 100%; max-width: 360px; padding: 5px 12px; margin: 6px 0;
-      border-radius: var(--radius-sm); font-size: 11px; font-weight: 600;
+
+    .loop-end-marker,
+    .ifelse-end-marker {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      max-width: 360px;
+      padding: 5px 12px;
+      margin: 6px 0;
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+      font-weight: 600;
       letter-spacing: 0.5px;
     }
+
     .loop-end-marker {
-      background: rgba(99,102,241,0.08); border: 1px dashed var(--step-LOOP);
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px dashed var(--step-LOOP);
       color: var(--step-LOOP);
     }
+
     .ifelse-end-marker {
-      background: rgba(234,179,8,0.08); border: 1px dashed var(--step-IF_ELSE);
+      background: rgba(234, 179, 8, 0.08);
+      border: 1px dashed var(--step-IF_ELSE);
       color: var(--step-IF_ELSE);
     }
 
@@ -339,233 +1188,363 @@
        IF_ELSE CONTAINER — dual branch columns
        ========================================================= */
     .if-branches {
-      display: flex; gap: 8px; width: 100%; max-width: 360px; margin: 4px 0;
+      display: flex;
+      gap: 8px;
+      width: 100%;
+      max-width: 360px;
+      margin: 4px 0;
     }
+
     .if-branch {
-      flex: 1; display: flex; flex-direction: column; align-items: center;
-      min-width: 0; border-radius: var(--radius-sm); overflow: hidden;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 0;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
     }
+
     .branch-header {
-      width: 100%; padding: 5px 8px; font-size: 10px; font-weight: 700;
-      text-align: center; text-transform: uppercase; letter-spacing: 0.5px;
+      width: 100%;
+      padding: 5px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      text-align: center;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
-    .if-branch.if-true  { border: 1px solid rgba(34,197,94,0.3); }
-    .if-branch.if-false { border: 1px solid rgba(239,68,68,0.3); }
-    .if-branch.if-true  .branch-header { background: rgba(34,197,94,0.12); color: var(--green); }
-    .if-branch.if-false .branch-header { background: rgba(239,68,68,0.12); color: var(--red); }
-    .if-branch .loop-body-inner { padding-left: 0; max-width: 100%; }
+
+    .if-branch.if-true {
+      border: 1px solid rgba(34, 197, 94, 0.3);
+    }
+
+    .if-branch.if-false {
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .if-branch.if-true .branch-header {
+      background: rgba(34, 197, 94, 0.12);
+      color: var(--green);
+    }
+
+    .if-branch.if-false .branch-header {
+      background: rgba(239, 68, 68, 0.12);
+      color: var(--red);
+    }
+
+    .if-branch .loop-body-inner {
+      padding-left: 0;
+      max-width: 100%;
+    }
 
     /* Inner insert button (inside LOOP / IF branches) */
     .insert-inner {
-      width: 20px; height: 20px; border-radius: 50%; margin: 4px 0;
-      background: var(--bg-hover); border: 1px dashed var(--bg-border);
-      display: flex; align-items: center; justify-content: center;
-      color: var(--text-dim); font-size: 13px; cursor: pointer; transition: all 0.2s;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      margin: 4px 0;
+      background: var(--bg-hover);
+      border: 1px dashed var(--bg-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
     }
-    .insert-inner:hover { background: var(--accent); color: white; border-color: var(--accent); }
-    .if-branch .node-wrapper { width: 95%; }
-    .if-branch .node-card { font-size: 11px; }
+
+    .insert-inner:hover {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .if-branch .node-wrapper {
+      width: 95%;
+    }
+
+    .if-branch .node-card {
+      font-size: 11px;
+    }
 
     /* =========================================================
        KEYBOARD — register key button
        ========================================================= */
     .key-display {
-      flex: 1; background: var(--bg-void); border: 1px solid var(--bg-border);
-      border-radius: var(--radius-sm); padding: 5px 10px;
-      font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
-      color: var(--accent); text-align: center; min-height: 28px;
-      display: flex; align-items: center; justify-content: center;
+      flex: 1;
+      background: var(--bg-void);
+      border: 1px solid var(--bg-border);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+      text-align: center;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
-    .key-register-btn { position: relative; overflow: hidden; }
+
+    .key-register-btn {
+      position: relative;
+      overflow: hidden;
+    }
+
     .key-register-btn.listening {
-      color: var(--red) !important; border-color: var(--red) !important;
+      color: var(--red) !important;
+      border-color: var(--red) !important;
       animation: keyPulse 1s ease-in-out infinite;
     }
+
     @keyframes keyPulse {
-      0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
-      50%      { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+      }
+
+      50% {
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+      }
     }
 
     /* =========================================================
        FILL — multi-field rows
        ========================================================= */
     .fill-field-row {
-      display: flex; gap: 6px; align-items: center; margin-bottom: 4px;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 4px;
     }
-    .fill-field-row input { font-size: 11px; }
-    .mode-toggle { display: flex; gap: 4px; margin-bottom: 8px; }
-    .mode-toggle .btn { flex: 1; justify-content: center; font-size: 11px; padding: 4px 6px; }
+
+    .fill-field-row input {
+      font-size: 11px;
+    }
+
+    .mode-toggle {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    .mode-toggle .btn {
+      flex: 1;
+      justify-content: center;
+      font-size: 11px;
+      padding: 4px 6px;
+    }
 
     /* node-card inside branches — smaller */
-    .if-branch .node-card { border-radius: 4px; }
-    .if-branch .node-header { padding: 8px; }
-    .if-branch .node-icon-box { width: 24px; height: 24px; font-size: 11px; }
-    .if-branch .node-title { font-size: 11px; }
+    .if-branch .node-card {
+      border-radius: 4px;
+    }
 
+    .if-branch .node-header {
+      padding: 8px;
+    }
+
+    .if-branch .node-icon-box {
+      width: 24px;
+      height: 24px;
+      font-size: 11px;
+    }
+
+    .if-branch .node-title {
+      font-size: 11px;
+    }
   </style>
 </head>
+
 <body>
 
-<div id="app">
-  <!-- Header -->
-  <header id="header">
-    <div class="logo-container">
-      <div class="logo-bolt">⚡</div> FlowScrape
-    </div>
-    <div class="nav-pills">
-      <div class="nav-pill active" data-tab="pipeline">Flow</div>
-      <div class="nav-pill" data-tab="monitor">Run</div>
-      <div class="nav-pill" data-tab="config">Settings</div>
-    </div>
-  </header>
-
-  <!-- Run Bar -->
-  <div id="run-bar">
-    <button class="btn btn-primary w-full" id="btn-master-run" style="font-size: 14px; padding: 8px; justify-content: center;">
-      ▶ Run Pipeline
-    </button>
-    <button class="btn btn-danger hidden w-full" id="btn-master-stop" style="font-size: 14px; padding: 8px; justify-content: center;">
-      ⏹ Stop Execution
-    </button>
-  </div>
-
-  <div id="views">
-    <!-- View: PIPELINE -->
-    <div id="view-pipeline" class="view active">
-      <div class="flex justify-between items-center" style="position: absolute; top: 10px; right: 10px; z-index: 10; gap: 6px;">
-        <button class="btn" id="btn-export-script">📜 Export Script</button>
-        <button class="btn" id="btn-clear-pipeline">🗑 Clear</button>
+  <div id="app">
+    <!-- Header -->
+    <header id="header">
+      <div class="logo-container">
+        <div class="logo-bolt">⚡</div> FlowScrape
       </div>
-      
-      <div id="pipeline-canvas">
-        <!-- Rendered by pipeline-builder.js -->
-        <div class="empty-state">Loading pipeline...</div>
+      <div class="nav-pills">
+        <div class="nav-pill active" data-tab="pipeline">Flow</div>
+        <div class="nav-pill" data-tab="monitor">Run</div>
+        <div class="nav-pill" data-tab="config">Settings</div>
       </div>
+    </header>
+
+    <!-- Run Bar -->
+    <div id="run-bar">
+      <button class="btn btn-primary w-full" id="btn-master-run"
+        style="font-size: 14px; padding: 8px; justify-content: center;">
+        ▶ Run Pipeline
+      </button>
+      <button class="btn btn-danger hidden w-full" id="btn-master-stop"
+        style="font-size: 14px; padding: 8px; justify-content: center;">
+        ⏹ Stop Execution
+      </button>
     </div>
 
-    <!-- View: MONITOR -->
-    <div id="view-monitor" class="view">
-      <div class="metric-grid">
-        <div class="metric-card">
-          <div class="metric-label">Processed</div>
-          <div class="metric-val" style="color: var(--accent);" id="mon-rows">0</div>
+    <div id="views">
+      <!-- View: PIPELINE -->
+      <div id="view-pipeline" class="view active">
+        <div id="board-toolbar">
+          <div class="flex gap-2">
+            <button class="btn" id="btn-export-script">📜 Export Script</button>
+            <button class="btn" id="btn-clear-pipeline">🗑 Clear</button>
+          </div>
+          <div class="flex gap-2 items-center">
+            <button class="btn" id="btn-board-zoom-out" title="Zoom Out">－</button>
+            <button class="btn" id="btn-board-zoom-reset" title="Reset Zoom">100%</button>
+            <button class="btn" id="btn-board-zoom-in" title="Zoom In">＋</button>
+            <button class="btn" id="btn-board-fit" title="Fit to Board">Fit</button>
+            <span id="board-zoom-label" class="mono"
+              style="min-width:52px;text-align:right;color:var(--text-dim);">100%</span>
+          </div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">Errors</div>
-          <div class="metric-val" style="color: var(--red);" id="mon-errs">0</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Time Elapsed</div>
-          <div class="metric-val" style="color: var(--text-main);" id="mon-time">00:00</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Status</div>
-          <div class="metric-val" style="color: var(--green); font-size: 16px; line-height:30px;" id="mon-state">Idle</div>
+
+        <div id="board-viewport">
+          <div id="board-stage">
+            <svg id="pipeline-wires" aria-hidden="true"></svg>
+            <div id="pipeline-canvas">
+              <!-- Rendered by pipeline-builder.js -->
+              <div class="empty-state">Loading pipeline...</div>
+            </div>
+          </div>
         </div>
       </div>
-      
-      <div style="background: var(--bg-raised); border: 1px solid var(--bg-border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px;">
-        <div class="flex justify-between items-center">
+
+      <!-- View: MONITOR -->
+      <div id="view-monitor" class="view">
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-label">Processed</div>
+            <div class="metric-val" style="color: var(--accent);" id="mon-rows">0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Errors</div>
+            <div class="metric-val" style="color: var(--red);" id="mon-errs">0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Time Elapsed</div>
+            <div class="metric-val" style="color: var(--text-main);" id="mon-time">00:00</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Status</div>
+            <div class="metric-val" style="color: var(--green); font-size: 16px; line-height:30px;" id="mon-state">Idle
+            </div>
+          </div>
+        </div>
+
+        <div
+          style="background: var(--bg-raised); border: 1px solid var(--bg-border); border-radius: var(--radius); padding: 12px; margin-bottom: 16px;">
+          <div class="flex justify-between items-center">
             <span class="metric-label">Progress</span>
             <span class="mono text-muted" id="mon-progress-text">0%</span>
-        </div>
-        <div class="progress-track"><div class="progress-fill" id="mon-progress-fill"></div></div>
-      </div>
-
-      <div class="flex justify-between items-center" style="margin-bottom: 8px;">
-        <h3 style="margin:0; font-size: 12px; color: var(--text-dim); text-transform: uppercase;">Live Logstream</h3>
-        <div class="flex gap-2">
-          <button class="btn" id="btn-download-partial" style="font-size:11px;">💾 Download Data</button>
-          <button class="btn-icon" id="btn-clear-logs" title="Clear Logs">🗑</button>
-        </div>
-      </div>
-      <div class="log-container" id="mon-logs">
-        <div class="log-entry info-log"><span class="log-ts">[System]</span><span class="log-msg">Ready to start pipeline.</span></div>
-      </div>
-    </div>
-
-    <!-- View: CONFIG -->
-    <div id="view-config" class="view">
-      
-      <!-- API Keys -->
-      <div class="accordion-section">
-        <div class="accordion-header">
-          <span>🔑 API Keys & Services</span>
-          <span style="font-size: 10px; color: var(--text-dim);">▼</span>
-        </div>
-        <div class="accordion-content">
-          <p>Keys are stored in volatile session memory only.</p>
-          <label>2Captcha</label>
-          <div class="flex gap-2 mb-2">
-            <input type="text" placeholder="API Key" id="key-2captcha">
-            <button class="btn" id="btn-save-key-2captcha">Save</button>
           </div>
-          <label>OpenAI</label>
+          <div class="progress-track">
+            <div class="progress-fill" id="mon-progress-fill"></div>
+          </div>
+        </div>
+
+        <div class="flex justify-between items-center" style="margin-bottom: 8px;">
+          <h3 style="margin:0; font-size: 12px; color: var(--text-dim); text-transform: uppercase;">Live Logstream</h3>
           <div class="flex gap-2">
-            <input type="text" placeholder="sk-..." id="key-openai">
-            <button class="btn" id="btn-save-key-openai">Save</button>
-          </div>
-          <label style="margin-top:16px;">Ethics Engine</label>
-          <div class="toggle-wrap">
-             <input type="checkbox" id="bypass-robots">
-             <div class="toggle-switch"></div>
-             <span>Bypass Robots.txt</span>
+            <button class="btn" id="btn-download-partial" style="font-size:11px;">💾 Download Data</button>
+            <button class="btn-icon" id="btn-clear-logs" title="Clear Logs">🗑</button>
           </div>
         </div>
-      </div>
-
-      <!-- Overlays (Moved from overlay-panel.js structure but styled natively) -->
-      <div class="accordion-section">
-        <div class="accordion-header">
-          <span>👁 Visual Overlays</span>
-          <span style="font-size: 10px; color: var(--text-dim);">▼</span>
-        </div>
-        <div class="accordion-content" id="overlay-panel-root">
-             <!-- Rendered by overlay-panel.js later, but we use native styles now -->
+        <div class="log-container" id="mon-logs">
+          <div class="log-entry info-log"><span class="log-ts">[System]</span><span class="log-msg">Ready to start
+              pipeline.</span></div>
         </div>
       </div>
 
-      <!-- Proxies -->
-      <div class="accordion-section">
-        <div class="accordion-header">
-          <span>🌐 Proxy Pool</span>
-          <span style="font-size: 10px; color: var(--text-dim);">▼</span>
-        </div>
-        <div class="accordion-content">
-             <label>Rotation Mode</label>
-             <select id="config-proxy-mode">
-                 <option value="round-robin">Round Robin</option>
-                 <option value="random">Random</option>
-                 <option value="sticky">Sticky per domain</option>
-             </select>
-             <label>Paste Proxies (IP:Port:User:Pass)</label>
-             <textarea id="config-proxy-text" rows="4" placeholder="192.168.1.1:8080:user:pass"></textarea>
-             <button class="btn mt-2 w-full" id="btn-update-proxies" style="margin-top: 8px;">Update Pool</button>
-        </div>
-      </div>
+      <!-- View: CONFIG -->
+      <div id="view-config" class="view">
 
+        <!-- API Keys -->
+        <div class="accordion-section">
+          <div class="accordion-header">
+            <span>🔑 API Keys & Services</span>
+            <span style="font-size: 10px; color: var(--text-dim);">▼</span>
+          </div>
+          <div class="accordion-content">
+            <p>Keys are stored in volatile session memory only.</p>
+            <label>2Captcha</label>
+            <div class="flex gap-2 mb-2">
+              <input type="text" placeholder="API Key" id="key-2captcha">
+              <button class="btn" id="btn-save-key-2captcha">Save</button>
+            </div>
+            <label>OpenAI</label>
+            <div class="flex gap-2">
+              <input type="text" placeholder="sk-..." id="key-openai">
+              <button class="btn" id="btn-save-key-openai">Save</button>
+            </div>
+            <label style="margin-top:16px;">Ethics Engine</label>
+            <div class="toggle-wrap">
+              <input type="checkbox" id="bypass-robots">
+              <div class="toggle-switch"></div>
+              <span>Bypass Robots.txt</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Overlays (Moved from overlay-panel.js structure but styled natively) -->
+        <div class="accordion-section">
+          <div class="accordion-header">
+            <span>👁 Visual Overlays</span>
+            <span style="font-size: 10px; color: var(--text-dim);">▼</span>
+          </div>
+          <div class="accordion-content" id="overlay-panel-root">
+            <!-- Rendered by overlay-panel.js later, but we use native styles now -->
+          </div>
+        </div>
+
+        <!-- Proxies -->
+        <div class="accordion-section">
+          <div class="accordion-header">
+            <span>🌐 Proxy Pool</span>
+            <span style="font-size: 10px; color: var(--text-dim);">▼</span>
+          </div>
+          <div class="accordion-content">
+            <label>Rotation Mode</label>
+            <select id="config-proxy-mode">
+              <option value="round-robin">Round Robin</option>
+              <option value="random">Random</option>
+              <option value="sticky">Sticky per domain</option>
+            </select>
+            <label>Paste Proxies (IP:Port:User:Pass)</label>
+            <textarea id="config-proxy-text" rows="4" placeholder="192.168.1.1:8080:user:pass"></textarea>
+            <button class="btn mt-2 w-full" id="btn-update-proxies" style="margin-top: 8px;">Update Pool</button>
+          </div>
+        </div>
+
+      </div>
     </div>
+
+    <!-- Step Palette Drawer -->
+    <div id="step-palette-overlay">
+      <div id="step-palette">
+        <div class="flex justify-between items-center" style="margin-bottom: 16px;">
+          <h2 style="margin:0;">Add Node</h2>
+          <button class="btn-icon" id="btn-close-palette">✕</button>
+        </div>
+        <input type="text" class="palette-search" placeholder="Search steps..." id="palette-search">
+
+        <!-- Populated dynamically by pipeline-builder.js -->
+        <div id="palette-content"></div>
+
+      </div>
+    </div>
+
   </div>
 
-  <!-- Step Palette Drawer -->
-  <div id="step-palette-overlay">
-    <div id="step-palette">
-      <div class="flex justify-between items-center" style="margin-bottom: 16px;">
-        <h2 style="margin:0;">Add Node</h2>
-        <button class="btn-icon" id="btn-close-palette">✕</button>
-      </div>
-      <input type="text" class="palette-search" placeholder="Search steps..." id="palette-search">
-      
-      <!-- Populated dynamically by pipeline-builder.js -->
-      <div id="palette-content"></div>
-      
-    </div>
-  </div>
-
-</div>
-
-<!-- Core Scripts -->
-<script type="module" src="pipeline-builder.js"></script>
-<script type="module" src="overlay-panel.js"></script>
+  <!-- Core Scripts -->
+  <script type="module" src="pipeline-builder.js"></script>
+  <script type="module" src="overlay-panel.js"></script>
 </body>
+
 </html>

@@ -179,6 +179,8 @@ async function _executeStep(step) {
   const { type, config } = step;
   const context = step.__fsContext || {};
   switch (type) {
+    case "WEBSITE":
+      return _stepNavigate(config, context);
     case "NAVIGATE":
       return _stepNavigate(config, context);
     case "CLICK":
@@ -209,6 +211,8 @@ async function _executeStep(step) {
       return _stepIfElse(config, context);
     case "EXPORT":
       return { exportTriggered: true };
+    case "API":
+      throw new Error("API step is executed in background runtime only");
     case "PAGINATE":
       return _stepClick(config, context);
     case "QUERY_COUNT": {
