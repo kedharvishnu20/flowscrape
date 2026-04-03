@@ -126,12 +126,22 @@ function _queryScoped(selector, context, all = false) {
   }
 }
 
-// ── Message bus (window.postMessage, source-checked) ─────────────────────────
 window.addEventListener("message", (event) => {
   // Source check: only trust messages from our extension background
   if (event.source !== window) return;
   const { type, payload, id } = event.data ?? {};
   if (!type || !type.startsWith("FS_")) return;
+
+  if (type === "FS_NETWORK_SNIFF") {
+    try {
+      chrome.runtime
+        .sendMessage({ type: "network:sniff", payload })
+        .catch(() => {});
+    } catch (e) {
+      // Extension context invalidated (reloaded)
+    }
+    return;
+  }
 
   _handleEvent(type, payload, id)
     .then((result) => {
@@ -459,7 +469,7 @@ async function _stepExtract({ fields = [], schema = [] }, context = {}) {
       return (
         el.src || el.getAttribute("src") || el.querySelector("source")?.src
       );
-    return el.textContent.trim();
+    return (el.innerText || el.textContent || "").trim();
   };
 
   for (const field of extractors) {
@@ -716,34 +726,58 @@ async function _formFillRow({ config, row, rowIndex, context }) {
 
 // ── Bulk selector — finds the common pattern for sibling elements ─────────────────
 function _buildBulkSelector(el) {
-  // Walk up to 4 levels looking for a parent with multiple matching children
+  // Build path from element up to the first repeating container
+  let path = [];
   let current = el;
-  for (let depth = 0; depth < 4; depth++) {
+  let foundBulkSequence = false;
+
+  for (let depth = 0; depth < 5; depth++) {
+    if (!current || current === document.documentElement) break;
+
     const parent = current.parentElement;
-    if (!parent) break;
+    const sameTagSiblings = parent
+      ? Array.from(parent.children).filter((c) => c.tagName === current.tagName)
+      : [];
 
-    // Find siblings with same tag
-    const sameTagSiblings = Array.from(parent.children).filter(
-      (c) => c.tagName === current.tagName,
-    );
+    let part = current.tagName.toLowerCase();
 
-    if (sameTagSiblings.length >= 2) {
-      // Find common classes across all matching siblings
+    if (!foundBulkSequence && sameTagSiblings.length > 1) {
+      // Find common classes across siblings
       const sigClass = _findCommonClass(sameTagSiblings);
-      const parentSel = _buildSpecificSelector(parent);
-      const childTag = current.tagName.toLowerCase();
-      const childSel = sigClass ? `${childTag}.${sigClass}` : childTag;
+      if (sigClass) {
+        part += `.${CSS.escape(sigClass)}`;
+      }
+      foundBulkSequence = true;
+    } else {
+      // Try to add stable classes
+      if (current.className && typeof current.className === "string") {
+        const stableClasses = current.className
+          .split(/\s+/)
+          .filter((c) => c && !/[\d_]/.test(c) && !c.includes("hover"));
+        if (stableClasses.length > 0) {
+          part += `.${CSS.escape(stableClasses[0])}`;
+        }
+      }
+    }
 
-      // Check: how many elements does this selector match?
-      const candidate = `${parentSel} > ${childSel}`;
+    path.unshift(part);
+
+    // If we've established a solid array anchor, check if it matches enough targets globally
+    if (foundBulkSequence) {
       try {
-        const count = document.querySelectorAll(candidate).length;
-        if (count >= 2) return { selector: candidate, count };
+        const candidate = path.join(" > ");
+        if (document.querySelectorAll(candidate).length >= 2) {
+          return {
+            selector: candidate,
+            count: document.querySelectorAll(candidate).length,
+          };
+        }
       } catch {}
     }
+
     current = parent;
   }
-  // Fallback: use just the element's own classes
+
   return {
     selector: _buildSpecificSelector(el),
     count: document.querySelectorAll(_buildSpecificSelector(el)).length,

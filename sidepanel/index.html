@@ -56,6 +56,7 @@
       --step-EXPORT: #22C55E;
       --step-WEBSITE: #38BDF8;
       --step-API: #06B6D4;
+      --step-API_SNIFFER: #8b5cf6;
 
       --radius: 8px;
       --radius-sm: 4px;
@@ -1393,6 +1394,9 @@
         <div id="board-toolbar">
           <div class="flex gap-2">
             <button class="btn" id="btn-export-script">📜 Export Script</button>
+            <button class="btn" id="btn-upload-pipeline">📂 Upload Pipeline</button>
+            <button class="btn" id="btn-download-pipeline">⬇ Pipeline JSON</button>
+            <input id="input-upload-pipeline" type="file" accept=".json,application/json" hidden />
             <button class="btn" id="btn-clear-pipeline">🗑 Clear</button>
           </div>
           <div class="flex gap-2 items-center">

@@ -1,0 +1,15 @@
+{
+  "name": "flowscrape-v3-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs --transport=stdio",
+    "start:http": "node server.mjs --transport=http",
+    "start:both": "node server.mjs --transport=both",
+    "check": "node --check server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  }
+}

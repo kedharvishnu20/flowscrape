@@ -53,8 +53,12 @@ const MODULE = "service-worker";
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function _broadcastLog(level, message, runId) {
+  const rs = _runStates.get(runId);
   chrome.runtime
-    .sendMessage({ type: "pipeline:log", payload: { level, message, runId } })
+    .sendMessage({
+      type: "pipeline:log",
+      payload: { level, message, runId, tabId: rs?.tabId },
+    })
     .catch(() => {});
 }
 
@@ -146,9 +150,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ── Message handlers ───────────────────────────────────────────────────────────
 
 _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
-
   const { pipeline, tabId } = payload;
   if (!pipeline) throw new Error("No pipeline provided");
+
+  const enableSniffer = (pipeline.steps || []).some(
+    (s) => s.type === "API_SNIFFER",
+  );
 
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const runState = {
@@ -156,8 +163,9 @@ _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
     paused: false,
     runId,
     tabId: tabId ?? sender.tab?.id,
+    enableSniffer,
     results: [],
-    screenshots: []
+    screenshots: [],
   };
   _runStates.set(runId, runState);
 
@@ -203,6 +211,27 @@ _registerHandler(MSG.PIPELINE_START, async (payload, sender) => {
   };
 });
 
+_registerHandler("network:sniff", async (payload, sender) => {
+  const tabId = sender.tab?.id;
+  if (!tabId) return { ok: false };
+  for (const [runId, rs] of _runStates.entries()) {
+    if (rs.tabId === tabId && rs.active && rs.enableSniffer) {
+      if (!Array.isArray(rs.networks)) rs.networks = [];
+      rs.networks.push({
+        timestamp: Date.now(),
+        method: payload.method,
+        url: payload.url,
+        status: payload.status,
+        requestBody: payload.reqBody || "",
+        responseBody: payload.resBody || "",
+        type: payload.apiType,
+      });
+      break;
+    }
+  }
+  return { ok: true };
+});
+
 // ── Step execution helpers ─────────────────────────────────────────────────────
 
 async function _captureScreenshot(tabId, config = {}, runId) {
@@ -222,7 +251,8 @@ async function _captureScreenshot(tabId, config = {}, runId) {
     runState.screenshots.push({ dataUrl, ts: Date.now() });
     _broadcastLog(
       "info-log",
-      `Screenshot #${runState.screenshots.length} captured.`, runId
+      `Screenshot #${runState.screenshots.length} captured.`,
+      runId,
     );
   } catch (err) {
     throw new Error(`Screenshot failed: ${err.message}`);
@@ -381,7 +411,8 @@ async function _doExport(runId, config) {
     dataExt = "csv";
   }
 
-  if (screenshots.length > 0) {
+  const networks = runState.networks || [];
+  if (screenshots.length > 0 || networks.length > 0) {
     // Bundle everything into a ZIP
     const zipFiles = [];
     if (allRows.length > 0) {
@@ -396,6 +427,42 @@ async function _doExport(runId, config) {
         bytes: _dataUrlToBytes(s.dataUrl),
       });
     });
+
+    if (networks.length > 0) {
+      const netHeaders = [
+        "timestamp",
+        "method",
+        "url",
+        "status",
+        "type",
+        "requestBody",
+        "responseBody",
+      ];
+      let netContent = "";
+      if (fmt === "json" || fmt === "jsonl") {
+        netContent = JSON.stringify(networks, null, 2);
+        zipFiles.push({
+          name: `api-sniffer.json`,
+          bytes: enc.encode(netContent),
+        });
+      } else {
+        netContent =
+          netHeaders.join(",") +
+          "\n" +
+          networks
+            .map((n) =>
+              netHeaders
+                .map((h) => `"${String(n[h] || "").replace(/"/g, '""')}"`)
+                .join(","),
+            )
+            .join("\n");
+        zipFiles.push({
+          name: `api-sniffer.csv`,
+          bytes: enc.encode("\uFEFF" + netContent),
+        });
+      }
+    }
+
     const zipBytes = _buildZip(zipFiles);
     const blob = new Blob([zipBytes], { type: "application/zip" });
     const zipUrl = URL.createObjectURL(blob);
@@ -406,7 +473,8 @@ async function _doExport(runId, config) {
     });
     _broadcastLog(
       "info-log",
-      `Exported ZIP: ${allRows.length} rows + ${screenshots.length} screenshots.`, runId
+      `Exported ZIP: ${allRows.length} rows, ${screenshots.length} screens, ${networks.length} APIs.`,
+      runId,
     );
   } else if (allRows.length > 0) {
     const dataUrl = `data:${dataMime};charset=utf-8,\uFEFF${encodeURIComponent(dataContent)}`;
@@ -417,7 +485,8 @@ async function _doExport(runId, config) {
     });
     _broadcastLog(
       "info-log",
-      `Exported ${allRows.length} rows as ${fmt.toUpperCase()}.`, runId
+      `Exported ${allRows.length} rows as ${fmt.toUpperCase()}.`,
+      runId,
     );
   } else {
     _broadcastLog("warn-log", "Export: no data collected.", runId);
@@ -613,18 +682,22 @@ async function _executeLoop(step, tabId, runId, parentCtx = {}) {
         _broadcastLog(
           "info-log",
           `Loop: found ${elementsData.length} elements for "${selector}"`,
-          runId
+          runId,
         );
       } else {
         _broadcastLog(
           "warn-log",
           `Loop: no elements matched "${selector}" — skipping.`,
-          runId
+          runId,
         );
         return;
       }
     } catch (e) {
-      _broadcastLog("warn-log", `Loop: element query failed: ${e.message}`, runId);
+      _broadcastLog(
+        "warn-log",
+        `Loop: element query failed: ${e.message}`,
+        runId,
+      );
     }
   }
 
@@ -671,7 +744,11 @@ async function _executeLoop(step, tabId, runId, parentCtx = {}) {
       await _executeStepList(children, tabId, runId, loopCtx);
       _broadcastLog("info-log", `Loop [${i + 1}/${iters}] done.`, runId);
     } catch (e) {
-      _broadcastLog("warn-log", `Loop [${i + 1}/${iters}] — ${e.message}`, runId);
+      _broadcastLog(
+        "warn-log",
+        `Loop [${i + 1}/${iters}] — ${e.message}`,
+        runId,
+      );
       if (onFail === "stop") break;
     }
   }
@@ -690,7 +767,7 @@ async function _executeIfElse(step, tabId, runId, parentCtx = {}) {
   _broadcastLog(
     "info-log",
     `IF_ELSE: condition ${met ? "met → IF" : "not met → ELSE"} branch.`,
-    runId
+    runId,
   );
   await _executeStepList(
     met ? step.ifBranch || [] : step.elseBranch || [],
@@ -714,7 +791,13 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
     chrome.runtime
       .sendMessage({
         type: "pipeline:status",
-        payload: { state: "running", currentStepId: step.id, progress: {}, runId },
+        payload: {
+          state: "running",
+          currentStepId: step.id,
+          progress: {},
+          runId,
+          tabId: runState?.tabId,
+        },
       })
       .catch(() => {});
 
@@ -742,8 +825,10 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       _broadcastLog(
         "info-log",
         `API ${apiResult.method} ${apiResult.url} → ${apiResult.status}`,
-        runId
+        runId,
       );
+    } else if (resolvedStep.type === "API_SNIFFER") {
+      await _sleep(50);
     } else if (resolvedStep.type === "EXPORT") {
       await finalizeBuffer(runId).catch(() => {});
       initBuffer(runId);
@@ -764,7 +849,7 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
         _broadcastLog(
           "info-log",
           `Extracted ${resp.result.length} rows (total: ${runState.results.length}).`,
-          runId
+          runId,
         );
         // Update live context so next steps can reference {{extracted.fieldName}}
         if (resp.result.length > 0)
@@ -802,7 +887,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
           state: "running",
           currentStepId: step.id,
           progress: { current: progressCount, total },
-          runId
+          runId,
         },
       })
       .catch(() => {});
@@ -838,6 +923,8 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         );
       } else if (resolvedStep.type === "EXPORT") {
         await _doExport(runId, resolvedStep.config);
+      } else if (resolvedStep.type === "API_SNIFFER") {
+        await _sleep(50);
       } else if (resolvedStep.type === "LOOP") {
         await _executeLoop(resolvedStep, targetTabId, runId, runtimeCtx);
       } else if (resolvedStep.type === "IF_ELSE") {
@@ -873,7 +960,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
       _broadcastLog(
         isCritical ? "error-log" : "warn-log",
         `[${resolvedStep.type}] ${err.message}${isCritical ? "" : " (optional, skipping)"}`,
-        runId
+        runId,
       );
       if (isCritical) {
         runState.active = false;
@@ -894,7 +981,7 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         state: stateStr,
         currentStepId: null,
         progress: { current: progressCount, total },
-        runId
+        runId,
       },
     })
     .catch(() => {});
@@ -942,7 +1029,7 @@ _registerHandler(MSG.STEP_EXECUTE, async (payload, sender) => {
 
 _registerHandler(MSG.PIPELINE_PAUSE, async (payload) => {
   const rs = _runStates.get(payload?.runId);
-  if(rs) {
+  if (rs) {
     rs.paused = true;
     logger.info(MODULE, "pipeline-paused", { runId: rs.runId });
   }
@@ -951,17 +1038,23 @@ _registerHandler(MSG.PIPELINE_PAUSE, async (payload) => {
 
 _registerHandler(MSG.PIPELINE_STOP, async (payload) => {
   const rs = _runStates.get(payload?.runId);
-  if(rs) {
+  if (rs) {
     rs.active = false;
     rs.paused = false;
     logger.info(MODULE, "pipeline-stopped", { runId: rs.runId });
   }
-  if(_runStates.size === 0) await chrome.alarms.clear("fs_sw_heartbeat");
+  if (_runStates.size === 0) await chrome.alarms.clear("fs_sw_heartbeat");
   return { ok: true };
 });
 
 _registerHandler(MSG.PIPELINE_STATUS, async (payload) => {
-  return { ...(_runStates.get(payload?.runId) || { active: false, paused: false, runId: payload?.runId }) };
+  return {
+    ...(_runStates.get(payload?.runId) || {
+      active: false,
+      paused: false,
+      runId: payload?.runId,
+    }),
+  };
 });
 
 _registerHandler(MSG.PROXY_SELECT, async (payload) => {

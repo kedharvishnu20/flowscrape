@@ -1,0 +1,726 @@
+import fs from 'fs/promises';
+import path from 'path';
+import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
+
+import { compilePipeline, serializePipeline } from '../script-gen/pipeline-compiler.js';
+import { emitPython } from '../script-gen/python-emitter.js';
+import { emitNode } from '../script-gen/node-emitter.js';
+import { checkRobots } from '../ethics/robots-parser.js';
+import { scanRows, scanText, summarizeFindings } from '../ethics/pii-detector.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_ROOT = path.resolve(__dirname, '..');
+const ROOT = resolveRootFromArgs(process.argv.slice(2)) ?? DEFAULT_ROOT;
+const TRANSPORT_MODE = resolveArgValue(process.argv.slice(2), '--transport=') ?? process.env.MCP_TRANSPORT ?? 'stdio';
+const HTTP_PORT = Number(resolveArgValue(process.argv.slice(2), '--port=') ?? process.env.PORT ?? 3000);
+const PIPELINES_DIR = path.join(ROOT, 'pipelines');
+const httpSessions = new Map();
+
+const server = new McpServer({
+  name: 'flowscrape-v3',
+  version: '3.0.0',
+});
+
+const supportedStepTypes = new Set([
+  'WEBSITE',
+  'NAVIGATE',
+  'API',
+  'CLICK',
+  'WAIT',
+  'EXTRACT',
+  'FORM_FILL',
+  'EXPORT',
+  'SCROLL',
+  'LOOP',
+  'IF_ELSE',
+]);
+
+server.tool(
+  'repo_list_files',
+  'List files and folders inside the FlowScrape workspace.',
+  {
+    directory: z.string().optional(),
+    maxDepth: z.number().int().min(0).max(10).optional(),
+  },
+  async ({ directory = '.', maxDepth = 3 }) => {
+    const baseDir = resolveWorkspacePath(directory);
+    const entries = await listTree(baseDir, maxDepth);
+    return textResult({ root: ROOT, directory, maxDepth, entries });
+  },
+);
+
+server.tool(
+  'repo_read_file',
+  'Read a text file from the workspace with optional line bounds.',
+  {
+    path: z.string(),
+    startLine: z.number().int().min(1).optional(),
+    endLine: z.number().int().min(1).optional(),
+  },
+  async ({ path: filePath, startLine = 1, endLine }) => {
+    const resolved = resolveWorkspacePath(filePath);
+    const content = await fs.readFile(resolved, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const start = Math.max(1, startLine);
+    const finish = Math.min(endLine ?? lines.length, lines.length);
+    const slice = lines.slice(start - 1, finish);
+    return textResult({
+      path: toWorkspaceRelative(resolved),
+      startLine: start,
+      endLine: finish,
+      content: slice.join('\n'),
+    });
+  },
+);
+
+server.tool(
+  'repo_write_file',
+  'Write a text file within the workspace.',
+  {
+    path: z.string(),
+    content: z.string(),
+  },
+  async ({ path: filePath, content }) => {
+    const resolved = resolveWorkspacePath(filePath);
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    await fs.writeFile(resolved, content, 'utf8');
+    return textResult({ path: toWorkspaceRelative(resolved), bytesWritten: Buffer.byteLength(content, 'utf8') });
+  },
+);
+
+server.tool(
+  'repo_search_text',
+  'Search the workspace for a literal string or regular expression.',
+  {
+    query: z.string(),
+    regex: z.boolean().optional(),
+    caseSensitive: z.boolean().optional(),
+    include: z.string().optional(),
+    maxResults: z.number().int().min(1).max(200).optional(),
+  },
+  async ({ query, regex = false, caseSensitive = false, include = '.', maxResults = 50 }) => {
+    const needle = regex ? new RegExp(query, caseSensitive ? 'g' : 'gi') : null;
+    const literal = caseSensitive ? query : query.toLowerCase();
+    const matches = [];
+    const files = await collectFiles(resolveWorkspacePath(include));
+
+    for (const file of files) {
+      if (matches.length >= maxResults) break;
+      const content = await safeReadText(file);
+      if (content == null) continue;
+      const lines = content.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const haystack = caseSensitive ? line : line.toLowerCase();
+        const hit = regex ? line.match(needle) : haystack.includes(literal) ? [query] : null;
+        if (!hit) continue;
+        matches.push({
+          path: toWorkspaceRelative(file),
+          line: i + 1,
+          excerpt: line.trim(),
+        });
+        if (matches.length >= maxResults) break;
+      }
+    }
+
+    return textResult({ query, regex, caseSensitive, include, maxResults, matches });
+  },
+);
+
+server.tool(
+  'pipeline_compile',
+  'Compile a FlowScrape pipeline recipe into an AST.',
+  {
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+  },
+  async ({ recipeJson, recipe }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const result = compilePipeline(input);
+    return textResult(result);
+  },
+);
+
+server.tool(
+  'pipeline_validate',
+  'Validate a pipeline recipe and report unsupported step types.',
+  {
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+  },
+  async ({ recipeJson, recipe }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const compiled = compilePipeline(input);
+    const flattened = flattenSteps(input?.steps ?? []);
+    const unsupported = flattened
+      .filter((step) => step.type && !supportedStepTypes.has(String(step.type).toUpperCase()))
+      .map((step) => ({ id: step.id ?? null, type: step.type }));
+
+    const warnings = [];
+    if (!input?.targetOrigin) warnings.push('targetOrigin is missing.');
+    if (flattened.length === 0) warnings.push('No steps were provided.');
+    if (unsupported.length > 0) warnings.push(`Unsupported step types: ${unsupported.map((step) => step.type).join(', ')}`);
+
+    return textResult({
+      errors: compiled.errors,
+      warnings,
+      unsupportedSteps: unsupported,
+      stepCount: flattened.length,
+      ok: compiled.errors.length === 0 && unsupported.length === 0,
+    });
+  },
+);
+
+server.tool(
+  'pipeline_list',
+  'List saved pipeline files from the reusable pipelines folder.',
+  {
+    directory: z.string().optional(),
+    recursive: z.boolean().optional(),
+    maxDepth: z.number().int().min(0).max(10).optional(),
+  },
+  async ({ directory = 'pipelines', recursive = true, maxDepth = 4 }) => {
+    const resolvedDir = resolveWorkspacePath(directory);
+    const entries = await listPipelineFiles(resolvedDir, { recursive, maxDepth });
+    return textResult({ root: ROOT, directory, recursive, maxDepth, entries });
+  },
+);
+
+server.tool(
+  'pipeline_save',
+  'Save a pipeline recipe to disk so it can be reused later.',
+  {
+    name: z.string().optional(),
+    path: z.string().optional(),
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+    overwrite: z.boolean().optional(),
+  },
+  async ({ name, path: relativePath, recipeJson, recipe, overwrite = false }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const { ast, errors } = compilePipeline(input);
+    if (!ast) return textResult({ errors });
+
+    const targetPath = resolvePipelinePath(relativePath ?? name ?? ast.name);
+    if (!overwrite) {
+      try {
+        await fs.access(targetPath);
+        return textResult({
+          errors: [`Pipeline already exists at ${toWorkspaceRelative(targetPath)}. Set overwrite=true to replace it.`],
+        });
+      } catch {
+        // file does not exist
+      }
+    }
+
+    const record = {
+      ...ast,
+      meta: {
+        ...ast.meta,
+        savedAt: new Date().toISOString(),
+        source: 'mcp',
+      },
+    };
+
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, JSON.stringify(record, null, 2), 'utf8');
+    return textResult({ path: toWorkspaceRelative(targetPath), saved: true, name: record.name, stepCount: record.meta.stepCount });
+  },
+);
+
+server.tool(
+  'pipeline_load',
+  'Load a saved pipeline file back into the conversation.',
+  {
+    path: z.string().optional(),
+    name: z.string().optional(),
+  },
+  async ({ path: relativePath, name }) => {
+    const targetPath = resolvePipelinePath(relativePath ?? name);
+    const content = await fs.readFile(targetPath, 'utf8');
+    const pipeline = JSON.parse(content);
+    const compiled = compilePipeline(pipeline);
+    return textResult({ path: toWorkspaceRelative(targetPath), pipeline, errors: compiled.errors });
+  },
+);
+
+server.tool(
+  'pipeline_serialize',
+  'Serialize a pipeline with sensitive values redacted.',
+  {
+    pipelineJson: z.string().optional(),
+    pipeline: z.any().optional(),
+  },
+  async ({ pipelineJson, pipeline }) => {
+    const input = pipeline ?? parseMaybeJson(pipelineJson) ?? null;
+    return textResult({ serialized: serializePipeline(input) });
+  },
+);
+
+server.tool(
+  'pipeline_emit_python',
+  'Compile a pipeline recipe and emit a Python automation script.',
+  {
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+  },
+  async ({ recipeJson, recipe }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const { ast, errors } = compilePipeline(input);
+    if (!ast) return textResult({ errors });
+    return textResult({ errors, code: emitPython(ast) });
+  },
+);
+
+server.tool(
+  'pipeline_emit_node',
+  'Compile a pipeline recipe and emit a Node automation script.',
+  {
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+  },
+  async ({ recipeJson, recipe }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const { ast, errors } = compilePipeline(input);
+    if (!ast) return textResult({ errors });
+    return textResult({ errors, code: emitNode(ast) });
+  },
+);
+
+server.tool(
+  'pii_scan_text',
+  'Scan plain text for common PII patterns.',
+  {
+    text: z.string(),
+    limit: z.number().int().min(1).max(200).optional(),
+  },
+  async ({ text, limit = 50 }) => {
+    const findings = scanText(text).slice(0, limit);
+    return textResult({ findings, summary: summarizeFindings(findings) });
+  },
+);
+
+server.tool(
+  'pii_scan_rows',
+  'Scan rows for common PII patterns.',
+  {
+    rowsJson: z.string().optional(),
+    rows: z.any().optional(),
+    limit: z.number().int().min(1).max(200).optional(),
+  },
+  async ({ rowsJson, rows, limit = 50 }) => {
+    const input = rows ?? parseMaybeJson(rowsJson) ?? [];
+    const findings = scanRows(Array.isArray(input) ? input : [], limit);
+    return textResult({ findings, summary: summarizeFindings(findings) });
+  },
+);
+
+server.tool(
+  'robots_check',
+  'Check whether a path is allowed by robots.txt for an origin.',
+  {
+    origin: z.string(),
+    path: z.string(),
+    userAgent: z.string().optional(),
+  },
+  async ({ origin, path: targetPath, userAgent }) => {
+    const result = await checkRobots(origin, targetPath, userAgent);
+    return textResult(result);
+  },
+);
+
+server.tool(
+  'rows_to_text',
+  'Render rows as CSV, JSON, JSONL, TSV, XML, or Markdown text.',
+  {
+    rowsJson: z.string(),
+    format: z.enum(['csv', 'json', 'jsonl', 'tsv', 'xml', 'markdown']),
+    filename: z.string().optional(),
+  },
+  async ({ rowsJson, format, filename }) => {
+    const rows = parseMaybeJson(rowsJson) ?? [];
+    const text = renderRows(rows, format);
+    return textResult({ format, filename: filename ?? defaultFilename(format), text });
+  },
+);
+
+server.tool(
+  'pipeline_report',
+  'Summarize the pipeline and the generated artifacts in one response.',
+  {
+    recipeJson: z.string().optional(),
+    recipe: z.any().optional(),
+  },
+  async ({ recipeJson, recipe }) => {
+    const input = recipe ?? parseMaybeJson(recipeJson) ?? null;
+    const compiled = compilePipeline(input);
+    const flattened = flattenSteps(input?.steps ?? []);
+    const report = {
+      root: ROOT,
+      name: compiled.ast?.name ?? input?.name ?? 'Untitled',
+      targetOrigin: compiled.ast?.targetOrigin ?? input?.targetOrigin ?? '',
+      stepCount: flattened.length,
+      errors: compiled.errors,
+      pythonBytes: compiled.ast ? emitPython(compiled.ast).length : 0,
+      nodeBytes: compiled.ast ? emitNode(compiled.ast).length : 0,
+    };
+    return textResult(report);
+  },
+);
+
+async function main() {
+  if (TRANSPORT_MODE === 'stdio' || TRANSPORT_MODE === 'both') {
+    await server.connect(new StdioServerTransport());
+  }
+
+  if (TRANSPORT_MODE === 'http' || TRANSPORT_MODE === 'both') {
+    await startHttpServer();
+  }
+}
+
+main().catch((error) => {
+  console.error(JSON.stringify({ level: 'error', message: error?.message ?? String(error) }));
+  process.exit(1);
+});
+
+function resolveRootFromArgs(args) {
+  const rootArg = args.find((arg) => arg.startsWith('--root='));
+  if (!rootArg) return null;
+  const value = rootArg.slice('--root='.length).trim();
+  return value ? path.resolve(value) : null;
+}
+
+function resolveArgValue(args, prefix) {
+  const arg = args.find((value) => value.startsWith(prefix));
+  if (!arg) return null;
+  const value = arg.slice(prefix.length).trim();
+  return value || null;
+}
+
+function resolveWorkspacePath(targetPath) {
+  const resolved = path.resolve(ROOT, targetPath);
+  const rootWithSep = ROOT.endsWith(path.sep) ? ROOT : `${ROOT}${path.sep}`;
+  if (resolved !== ROOT && !resolved.startsWith(rootWithSep)) {
+    throw new Error(`Path escapes workspace root: ${targetPath}`);
+  }
+  return resolved;
+}
+
+function toWorkspaceRelative(resolvedPath) {
+  const rel = path.relative(ROOT, resolvedPath);
+  return rel || '.';
+}
+
+function resolvePipelinePath(target) {
+  const raw = String(target ?? '').trim();
+  if (!raw) {
+    throw new Error('A pipeline name or path is required.');
+  }
+
+  const normalized = raw.endsWith('.json') ? raw : `${raw}.json`;
+  const basePath = normalized.includes(path.sep) || normalized.includes('/')
+    ? normalized
+    : path.join('pipelines', normalized);
+  return resolveWorkspacePath(basePath);
+}
+
+async function listPipelineFiles(directory, { recursive = true, maxDepth = 4 } = {}, currentDepth = 0) {
+  const entries = [];
+  if (currentDepth > maxDepth) return entries;
+
+  const dirents = await fs.readdir(directory, { withFileTypes: true });
+  for (const dirent of dirents) {
+    const fullPath = path.join(directory, dirent.name);
+    if (dirent.isDirectory()) {
+      if (recursive && currentDepth < maxDepth) {
+        entries.push(...await listPipelineFiles(fullPath, { recursive, maxDepth }, currentDepth + 1));
+      }
+      continue;
+    }
+
+    if (!dirent.name.toLowerCase().endsWith('.json')) continue;
+
+    const content = await safeReadText(fullPath);
+    let summary = null;
+    if (content) {
+      try {
+        const pipeline = JSON.parse(content);
+        summary = {
+          name: pipeline.name ?? dirent.name.replace(/\.json$/i, ''),
+          targetOrigin: pipeline.targetOrigin ?? '',
+          stepCount: Array.isArray(pipeline.steps) ? pipeline.steps.length : 0,
+          savedAt: pipeline.meta?.savedAt ?? pipeline.meta?.compiledAt ?? null,
+        };
+      } catch {
+        summary = { name: dirent.name.replace(/\.json$/i, ''), invalidJson: true };
+      }
+    }
+
+    entries.push({
+      path: toWorkspaceRelative(fullPath),
+      ...summary,
+    });
+  }
+
+  return entries;
+}
+
+async function startHttpServer() {
+  const app = createMcpExpressApp();
+
+  app.post('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    try {
+      let transport;
+      if (sessionId && httpSessions.has(sessionId)) {
+        transport = httpSessions.get(sessionId);
+      } else if (!sessionId && isInitializeRequest(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (nextSessionId) => {
+            httpSessions.set(nextSessionId, transport);
+          },
+        });
+
+        transport.onclose = () => {
+          const nextSessionId = transport.sessionId;
+          if (nextSessionId) httpSessions.delete(nextSessionId);
+        };
+
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        return;
+      } else {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: 'Bad Request: No valid session ID provided',
+          },
+          id: null,
+        });
+        return;
+      }
+
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32603,
+            message: 'Internal server error',
+          },
+          id: null,
+        });
+      }
+      console.error(JSON.stringify({ level: 'error', message: error?.message ?? String(error) }));
+    }
+  });
+
+  app.get('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !httpSessions.has(sessionId)) {
+      res.status(400).send('Invalid or missing session ID');
+      return;
+    }
+
+    const transport = httpSessions.get(sessionId);
+    await transport.handleRequest(req, res);
+  });
+
+  app.delete('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !httpSessions.has(sessionId)) {
+      res.status(400).send('Invalid or missing session ID');
+      return;
+    }
+
+    const transport = httpSessions.get(sessionId);
+    await transport.handleRequest(req, res);
+  });
+
+  await new Promise((resolve) => {
+    app.listen(HTTP_PORT, () => {
+      console.log(`HTTP MCP server listening on http://localhost:${HTTP_PORT}/mcp`);
+      resolve();
+    });
+  });
+}
+
+async function listTree(directory, maxDepth, currentDepth = 0) {
+  const entries = [];
+  if (currentDepth > maxDepth) return entries;
+
+  const dirents = await fs.readdir(directory, { withFileTypes: true });
+  for (const dirent of dirents) {
+    const fullPath = path.join(directory, dirent.name);
+    entries.push({
+      path: toWorkspaceRelative(fullPath),
+      type: dirent.isDirectory() ? 'directory' : 'file',
+    });
+    if (dirent.isDirectory() && currentDepth < maxDepth) {
+      entries.push(...await listTree(fullPath, maxDepth, currentDepth + 1));
+    }
+  }
+
+  return entries;
+}
+
+async function collectFiles(directory) {
+  const stats = await fs.stat(directory);
+  if (!stats.isDirectory()) return [directory];
+
+  const files = [];
+  const dirents = await fs.readdir(directory, { withFileTypes: true });
+  for (const dirent of dirents) {
+    if (shouldSkip(dirent.name)) continue;
+    const fullPath = path.join(directory, dirent.name);
+    if (dirent.isDirectory()) {
+      files.push(...await collectFiles(fullPath));
+    } else {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+async function safeReadText(filePath) {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size > 2_000_000) return null;
+    return await fs.readFile(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function shouldSkip(name) {
+  return ['.git', 'node_modules', 'dist', 'build', '.vscode'].includes(name);
+}
+
+function parseMaybeJson(value) {
+  if (!value) return null;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function flattenSteps(steps, output = []) {
+  for (const step of Array.isArray(steps) ? steps : []) {
+    output.push(step);
+    flattenSteps(step.children, output);
+    flattenSteps(step.ifBranch, output);
+    flattenSteps(step.elseBranch, output);
+  }
+  return output;
+}
+
+function renderRows(rows, format) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  switch (format) {
+    case 'csv':
+      return toCSV(safeRows);
+    case 'json':
+      return JSON.stringify(safeRows, null, 2);
+    case 'jsonl':
+      return safeRows.map((row) => JSON.stringify(row)).join('\n') + (safeRows.length ? '\n' : '');
+    case 'tsv':
+      return toTSV(safeRows);
+    case 'xml':
+      return toXML(safeRows);
+    case 'markdown':
+      return toMarkdown(safeRows);
+    default:
+      throw new Error(`Unsupported format: ${format}`);
+  }
+}
+
+function toCSV(rows) {
+  if (rows.length === 0) return '';
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.map(csvEscape).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((header) => csvEscape(row?.[header] ?? '')).join(','));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function toTSV(rows) {
+  if (rows.length === 0) return '';
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.join('\t')];
+  for (const row of rows) {
+    lines.push(headers.map((header) => String(row?.[header] ?? '').replace(/\t/g, ' ')).join('\t'));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function toXML(rows) {
+  const escape = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<rows>'];
+  for (const row of rows) {
+    lines.push('  <row>');
+    for (const [key, value] of Object.entries(row ?? {})) {
+      lines.push(`    <${key}>${escape(value)}</${key}>`);
+    }
+    lines.push('  </row>');
+  }
+  lines.push('</rows>');
+  return `${lines.join('\n')}\n`;
+}
+
+function toMarkdown(rows) {
+  if (rows.length === 0) return '';
+  const headers = Object.keys(rows[0]);
+  const escape = (value) => String(value ?? '').replace(/\|/g, '\\|');
+  const lines = [
+    `| ${headers.map(escape).join(' | ')} |`,
+    `| ${headers.map(() => '---').join(' | ')} |`,
+  ];
+  for (const row of rows) {
+    lines.push(`| ${headers.map((header) => escape(row?.[header] ?? '')).join(' | ')} |`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function csvEscape(value) {
+  const text = String(value ?? '');
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function defaultFilename(format) {
+  switch (format) {
+    case 'csv': return 'export.csv';
+    case 'json': return 'export.json';
+    case 'jsonl': return 'export.jsonl';
+    case 'tsv': return 'export.tsv';
+    case 'xml': return 'export.xml';
+    case 'markdown': return 'export.md';
+    default: return 'export.txt';
+  }
+}
+
+function textResult(data) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+  };
+}

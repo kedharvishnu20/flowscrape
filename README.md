@@ -186,3 +186,13 @@ The manifest references `icons/icon{16,32,48,128}.png`. Add these to the `icons/
 MIT — See LICENSE file.
 
 *FlowScrape v3 · Built complete or not at all.*
+
+## 🤖 MCP Server
+
+The repository now includes a standalone MCP server under [`mcp/`](mcp/). It exposes workspace file tools, pipeline compilation and emission, PII/robots checks, and row-formatting helpers for use from an MCP client.
+
+For the full point-by-point reference, see [docs/flowscrape-reference.md](docs/flowscrape-reference.md).
+
+For full end-to-end activity documentation with state variables, message flow, and module-level behavior, see [docs/flowscrape-e2e-activity-manual.md](docs/flowscrape-e2e-activity-manual.md).
+
+The MCP server also supports HTTP mode for clients that cannot spawn local processes, and it can save reusable pipeline definitions into the `pipelines/` folder.

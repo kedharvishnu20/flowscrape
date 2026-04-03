@@ -5,7 +5,9 @@ const MSG = {
   PIPELINE_START: "pipeline:start",
   PIPELINE_STOP: "pipeline:stop",
 };
-const SK = { PIPELINE: "fs_active_pipeline" };
+let SK = { PIPELINE: "fs_active_pipeline" };
+
+let _tabId = null;
 
 // ── Step Registry ─────────────────────────────────────────────────────────────
 const STEP_REGISTRY = {
@@ -126,6 +128,14 @@ const STEP_REGISTRY = {
       exposeBodyAsExtracted: false,
     },
   },
+  API_SNIFFER: {
+    icon: "🕵️",
+    cat: "Data",
+    desc: "API Sniffer",
+    def: {
+      enabled: true,
+    },
+  },
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -161,6 +171,23 @@ const elBoardZoomLabel = document.getElementById("board-zoom-label");
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  _tabId = tab ? tab.id : null;
+  if (_tabId) {
+    SK.PIPELINE = `fs_active_pipeline_${_tabId}`;
+  }
+
+  // Also listen for tab changes within the sidepanel to swap state
+  chrome.tabs.onActivated.addListener(async (activeInfo) => {
+    _tabId = activeInfo.tabId;
+    SK.PIPELINE = `fs_active_pipeline_${_tabId}`;
+    const saved = (await chrome.storage.local.get(SK.PIPELINE))[SK.PIPELINE];
+    _pipeline = saved?.steps ? saved : { steps: [] };
+    _expandedNodeId = null;
+    _boardState.fittedOnce = false;
+    renderPipeline();
+  });
+
   bindNavTabs();
   bindGlobalControls();
   bindPalette();
@@ -217,10 +244,11 @@ function bindNavTabs() {
 function bindGlobalControls() {
   document
     .getElementById("btn-clear-pipeline")
-    .addEventListener("click", () => {
+    .addEventListener("click", async () => {
       _pipeline.steps = [];
       _expandedNodeId = null;
       _boardState.fittedOnce = false;
+      await chrome.storage.local.remove(SK.PIPELINE);
       saveState();
       renderPipeline();
     });
@@ -233,14 +261,19 @@ function bindGlobalControls() {
       logToMonitor("warn-log", "Pipeline is empty.");
       return;
     }
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    if (!tab) {
+    const targetTabId = _tabId;
+    if (!targetTabId) {
       logToMonitor("warn-log", "No active tab found.");
       return;
     }
+    let tab;
+    try {
+      tab = await chrome.tabs.get(targetTabId);
+    } catch {
+      logToMonitor("warn-log", "Active tab is inaccessible.");
+      return;
+    }
+
     const bypassRobots =
       document.getElementById("bypass-robots")?.checked || false;
     let urlObj = null;
@@ -257,7 +290,7 @@ function bindGlobalControls() {
       type: MSG.PIPELINE_START,
       payload: {
         pipeline: _pipeline,
-        tabId: tab.id,
+        tabId: targetTabId,
         targetOrigin: urlObj ? urlObj.origin : null,
         targetPath: urlObj ? urlObj.pathname : "/",
         bypassRobots,
@@ -284,9 +317,9 @@ function bindGlobalControls() {
   });
 
   btnStop.addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ 
-      type: "pipeline:stop", 
-      payload: { runId: _runState.runId }
+    await chrome.runtime.sendMessage({
+      type: "pipeline:stop",
+      payload: { runId: _runState.runId, tabId: _tabId },
     });
     stopRunUI();
     logToMonitor("warn-log", "Pipeline stopped by user.");
@@ -369,6 +402,70 @@ function bindGlobalControls() {
         );
       }
     });
+
+  const uploadPipelineInput = document.getElementById("input-upload-pipeline");
+
+  document.getElementById("btn-upload-pipeline")?.addEventListener("click", () => {
+    uploadPipelineInput?.click();
+  });
+
+  uploadPipelineInput?.addEventListener("change", async (event) => {
+    const file = event.target?.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const normalized = _normalizeImportedPipeline(parsed);
+
+      _pipeline = normalized;
+      _expandedNodeId = null;
+      _boardState.fittedOnce = false;
+      await saveState();
+      renderPipeline();
+      logToMonitor(
+        "info-log",
+        `Loaded pipeline from ${file.name} (${normalized.steps.length} top-level steps).`,
+      );
+    } catch (error) {
+      logToMonitor(
+        "error-log",
+        `Upload failed: ${error?.message || "Invalid pipeline JSON file."}`,
+      );
+    } finally {
+      event.target.value = "";
+    }
+  });
+
+  document
+    .getElementById("btn-download-pipeline")
+    ?.addEventListener("click", async () => {
+      if (!_pipeline.steps.length) {
+        logToMonitor("warn-log", "Pipeline is empty.");
+        return;
+      }
+
+      const payload = {
+        ..._pipeline,
+        meta: {
+          exportedAt: new Date().toISOString(),
+          source: "flowscrape-sidepanel",
+        },
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `flowscrape_pipeline_${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      logToMonitor("info-log", "Pipeline JSON downloaded.");
+    });
+
   document
     .getElementById("btn-download-partial")
     ?.addEventListener("click", async () => {
@@ -783,6 +880,83 @@ function _removeStepDeep(steps, id) {
       return true;
   }
   return false;
+}
+
+function _nextStepId() {
+  return `s_${Date.now()}${Math.floor(Math.random() * 1000)}`;
+}
+
+function _normalizeImportedPipeline(source) {
+  const input = source?.pipeline?.steps ? source.pipeline : source;
+  if (!input || typeof input !== "object" || !Array.isArray(input.steps)) {
+    throw new Error("Pipeline file must contain an object with a steps array.");
+  }
+
+  const seenIds = new Set();
+  const steps = input.steps.map((step, index) =>
+    _normalizeImportedStep(step, `steps[${index}]`, seenIds),
+  );
+
+  return {
+    name: typeof input.name === "string" ? input.name : "Imported Pipeline",
+    version: typeof input.version === "string" ? input.version : "1.0.0",
+    targetOrigin:
+      typeof input.targetOrigin === "string" ? input.targetOrigin : "",
+    steps,
+  };
+}
+
+function _normalizeImportedStep(step, where, seenIds) {
+  if (!step || typeof step !== "object") {
+    throw new Error(`${where} is not a valid step object.`);
+  }
+
+  const type = String(step.type || "").trim().toUpperCase();
+  if (!type) {
+    throw new Error(`${where} is missing a step type.`);
+  }
+
+  let id = typeof step.id === "string" && step.id.trim() ? step.id.trim() : "";
+  if (!id || seenIds.has(id)) {
+    id = _nextStepId();
+  }
+  seenIds.add(id);
+
+  const normalized = {
+    id,
+    type,
+    config:
+      step.config && typeof step.config === "object"
+        ? JSON.parse(JSON.stringify(step.config))
+        : {},
+  };
+
+  if (Array.isArray(step.children) || type === "LOOP") {
+    normalized.children = Array.isArray(step.children)
+      ? step.children.map((child, idx) =>
+          _normalizeImportedStep(child, `${where}.children[${idx}]`, seenIds),
+        )
+      : [];
+  }
+
+  if (
+    Array.isArray(step.ifBranch) ||
+    Array.isArray(step.elseBranch) ||
+    type === "IF_ELSE"
+  ) {
+    normalized.ifBranch = Array.isArray(step.ifBranch)
+      ? step.ifBranch.map((child, idx) =>
+          _normalizeImportedStep(child, `${where}.ifBranch[${idx}]`, seenIds),
+        )
+      : [];
+    normalized.elseBranch = Array.isArray(step.elseBranch)
+      ? step.elseBranch.map((child, idx) =>
+          _normalizeImportedStep(child, `${where}.elseBranch[${idx}]`, seenIds),
+        )
+      : [];
+  }
+
+  return normalized;
 }
 
 // ── Add / remove / open palette ───────────────────────────────────────────────
@@ -1684,6 +1858,8 @@ function _registerKey(stepId) {
 // ── System listeners ──────────────────────────────────────────────────────────
 function listenToSystem() {
   chrome.runtime.onMessage.addListener((msg) => {
+    // If msg provides a tabId, only log/update if it matches our sidepanel's tab
+    if (msg.payload?.tabId && msg.payload.tabId !== _tabId) return;
     if (msg.payload?.runId && msg.payload.runId !== _runState.runId) return;
 
     if (msg.type === "pipeline:status") {
