@@ -3,6 +3,7 @@
 This is the single authoritative document for FlowScrape v3.
 
 It is written for two audiences at once:
+
 - humans who need a full architectural and operational manual
 - MCP-capable agents that need the repo structure, message contracts, and tool/API details
 
@@ -15,12 +16,14 @@ FlowScrape v3 is a Manifest V3 Chrome extension for browser automation, extracti
 It also ships with a standalone MCP server so external clients can inspect the repository, validate and emit pipelines, scan for PII, check robots permissions, and manage reusable pipeline files.
 
 The design has two execution planes:
+
 - the Chrome extension plane, which runs the live browser automation workflow
 - the MCP plane, which exposes repository and pipeline capabilities to outside clients
 
 ## 2. System Overview
 
 End-to-end runtime flow:
+
 1. A pipeline is created, edited, uploaded, or loaded in the side panel.
 2. The side panel persists that pipeline in tab-scoped local storage.
 3. The user starts a run.
@@ -231,6 +234,7 @@ Board pan and zoom state.
 9. State is saved and the pipeline is rendered.
 
 Import normalization rules:
+
 - top-level object must have `steps` array
 - `type` is normalized to uppercase
 - missing `config` becomes `{}`
@@ -272,6 +276,7 @@ Import normalization rules:
 ## 6. Step Registry and Supported Actions
 
 The side panel step registry includes:
+
 - `WEBSITE`
 - `NAVIGATE`
 - `CLICK`
@@ -292,6 +297,7 @@ The side panel step registry includes:
 - `API_SNIFFER`
 
 The `STEP_REGISTRY` values define:
+
 - `icon`
 - `cat`
 - `desc`
@@ -332,6 +338,7 @@ Message name map used by all handlers.
 Map of active or in-flight runs.
 
 Stored run state fields:
+
 - `active`
 - `paused`
 - `runId`
@@ -348,12 +355,14 @@ Registry of handler functions keyed by message name.
 ### 7.3 Startup lifecycle
 
 On `activate`:
+
 - logs activation
 - calls `initSessionKey()` to create or rehydrate the session AES key
 - calls `loadPool()` to restore proxy pool
 - starts heartbeat alarm
 
 On `install`:
+
 - logs install event
 - calls `self.skipWaiting()`
 
@@ -362,6 +371,7 @@ On `install`:
 `_startHeartbeat()` creates alarm `fs_sw_heartbeat` roughly every 20 seconds.
 
 Heartbeat listener:
+
 - logs debug heartbeat
 - keeps service worker alive during active use
 
@@ -376,6 +386,7 @@ All registered handlers are async and respond through `sendResponse`.
 Handler: `pipeline:start`
 
 Input expectations:
+
 - `pipeline`
 - `tabId`
 - `targetOrigin`
@@ -384,6 +395,7 @@ Input expectations:
 - optional timing and captcha fields
 
 Flow:
+
 1. Ensure `pipeline` exists.
 2. Detect whether any step is `API_SNIFFER`.
 3. Build `runId`.
@@ -394,6 +406,7 @@ Flow:
 8. On success, log warnings and start `_executePipeline(...)` asynchronously.
 
 Returned result:
+
 - `runId`
 - `warnings[]`
 
@@ -402,12 +415,14 @@ Returned result:
 Handler: `network:sniff`
 
 Flow:
+
 - identify active run by `tabId`
 - require `runState.active`
 - require `runState.enableSniffer`
 - append captured request/response data to `runState.networks`
 
 Stored sniff fields:
+
 - `timestamp`
 - `method`
 - `url`
@@ -425,6 +440,7 @@ Stores screenshots in `runState.screenshots` and logs capture count.
 #### `_executeStepList(steps, tabId, runId, ctx)`
 
 Used for nested execution flows. Important behavior:
+
 - creates `liveCtx` with `extracted` object
 - resolves template values with `_resolveConfig`
 - emits status messages per step
@@ -437,6 +453,7 @@ Used for nested execution flows. Important behavior:
 Primary top-level loop executor.
 
 Behavior:
+
 - initializes row buffer
 - respects pause flag
 - sends progress updates
@@ -449,6 +466,7 @@ Behavior:
 ### 7.9 Message handlers and contracts
 
 Handlers registered in service worker:
+
 - `pipeline:start`
 - `network:sniff`
 - `step:execute`
@@ -472,6 +490,7 @@ Handlers registered in service worker:
 ### 7.10 Service-worker state variables from imported modules
 
 Important supporting functions and module state are defined in imports:
+
 - proxy manager state
 - rate limiter buckets and retry state
 - key manager session crypto key
@@ -523,6 +542,7 @@ Constant map of content-event names.
 Incoming messages with `type` starting `FS_` are handled.
 
 Special case:
+
 - `FS_NETWORK_SNIFF` is forwarded to the service worker as `network:sniff`
 
 #### `chrome.runtime.onMessage`
@@ -532,6 +552,7 @@ Routes service-worker messages into `_handleEvent(...)`.
 ### 8.4 Event router
 
 `_handleEvent(type, payload, id)` routes to:
+
 - `_executeStep`
 - `_formFillRow`
 - `_activateSelectorPicker`
@@ -539,6 +560,7 @@ Routes service-worker messages into `_handleEvent(...)`.
 ### 8.5 Step dispatcher
 
 `_executeStep(step)` supports:
+
 - `WEBSITE`
 - `NAVIGATE`
 - `CLICK`
@@ -563,6 +585,7 @@ Routes service-worker messages into `_handleEvent(...)`.
 ### 8.6 Selector and scoped-query helpers
 
 Important helpers:
+
 - `_getScopedRoot(context)`
 - `_resolveTemplatePath(ctx, expr)`
 - `_renderSelectorTemplate(selector, context)`
@@ -572,6 +595,7 @@ Important helpers:
 ### 8.7 Extraction flow
 
 `_stepExtract(config, context)`:
+
 - builds extractor list
 - queries DOM nodes by selector
 - extracts values through field-type logic
@@ -584,10 +608,12 @@ Value extraction behavior depends on field type and element type.
 `_stepFill(config, context)` supports single and multi modes.
 
 Single mode:
+
 - resolves selector
 - types text
 
 Multi mode:
+
 - iterates field list
 - types each mapped value
 - optionally clicks submit selector
@@ -599,6 +625,7 @@ Multi mode:
 ### 8.10 Selector picker flow
 
 `_pickSelector(stepId, key)`:
+
 - asks user for specific vs bulk mode
 - sends picker request to page
 - writes selected selector back to input field
@@ -640,6 +667,7 @@ Top-level shape:
 ```
 
 Common recursive fields:
+
 - `children`
 - `ifBranch`
 - `elseBranch`
@@ -656,9 +684,11 @@ Common recursive fields:
 Source: [script-gen/python-emitter.js](../script-gen/python-emitter.js)
 
 Main entry:
+
 - `emitPython(pipeline)`
 
 Responsibilities:
+
 - emit runnable Python 3.11 script text
 - support navigation, clicks, waits, extraction, form fill, scrolling, loops, conditionals, API calls, export placeholders
 
@@ -667,6 +697,7 @@ Responsibilities:
 Source: [script-gen/node-emitter.js](../script-gen/node-emitter.js)
 
 Main entry:
+
 - `emitNode(pipeline)`
 
 Responsibilities mirror the Python emitter for Node 20 ESM.
@@ -678,11 +709,13 @@ Responsibilities mirror the Python emitter for Node 20 ESM.
 Source: [ethics/robots-parser.js](../ethics/robots-parser.js)
 
 Key state and behavior:
+
 - `CACHE_TTL_MS = 15 minutes`
 - `FS_USER_AGENT = 'FlowScrape'`
 - `_cache` map stores parsed robots content
 
 Behavior:
+
 - longest matching rule wins
 - wildcard `*` supported
 - `$` end anchor supported
@@ -692,6 +725,7 @@ Behavior:
 Source: [ethics/pii-detector.js](../ethics/pii-detector.js)
 
 Detects:
+
 - SSN
 - Visa
 - Mastercard
@@ -700,6 +734,7 @@ Detects:
 - phone
 
 Functions:
+
 - `scanRows(rows, limit)`
 - `scanText(text)`
 - `hasPII(rows)`
@@ -710,19 +745,23 @@ Functions:
 Source: [background/ethics-engine.js](../background/ethics-engine.js)
 
 Important constants:
+
 - `MAX_FORM_ROWS_DEFAULT = 500`
 - `MAX_FORM_ROWS_CONFIRMED = 5000`
 - `MIN_INTER_ROW_DELAY_MS = 800`
 - `ROBOTS_CACHE_TTL_MS = 15 * 60 * 1000`
 
 Important types:
+
 - `EthicsBlock`
 - `EthicsWarn`
 
 Main gate function:
+
 - `runEthicsGates(opts)`
 
 Gates:
+
 1. robots.txt check
 2. PII scan
 3. rate-limit estimate
@@ -733,6 +772,7 @@ Gates:
 ### 11.4 Hard blocks
 
 The ethics engine enforces hard blocks for:
+
 - password fields in form filling
 - hidden fields in form filling
 - exceeding allowed row counts
@@ -746,6 +786,7 @@ The ethics engine enforces hard blocks for:
 Source: [background/proxy-manager.js](../background/proxy-manager.js)
 
 Important state:
+
 - `_pool`: proxy entries without creds
 - `_credMap`: host:port to credentials
 - `_rrIndex`: round-robin index
@@ -753,10 +794,12 @@ Important state:
 - `_rotationMode`: current rotation mode
 
 Storage keys:
+
 - `STORAGE_KEY_POOL`
 - `STORAGE_KEY_CREDS`
 
 Main exports:
+
 - `parseProxyText(text)`
 - `parseProxyJSON(input)`
 - `parseProxyCSV(csv)`
@@ -782,14 +825,17 @@ Main exports:
 Source: [background/rate-limiter.js](../background/rate-limiter.js)
 
 Important state:
+
 - `_buckets`
 - `_retryState`
 
 Constants:
+
 - `DEFAULT_CAPACITY = 10`
 - `DEFAULT_REFILL_RATE = 1`
 
 Main exports:
+
 - `initBucket(domain, options)`
 - `acquire(domain, count)`
 - `backoff(domain, baseMs, maxMs, maxAttempts)`
@@ -801,13 +847,16 @@ Main exports:
 Source: [background/api-key-manager.js](../background/api-key-manager.js)
 
 Important state:
+
 - `_sessionCryptoKey`: in-memory AES-GCM key
 
 Important constants:
+
 - `SESSION_KEY_KEYS`
 - `SESSION_KEY_SK`
 
 Main exports:
+
 - `initSessionKey()`
 - `setApiKey(provider, keyValue)`
 - `getApiKey(provider)`
@@ -825,17 +874,20 @@ Main exports:
 Source: [checkpoint/row-buffer.js](../checkpoint/row-buffer.js)
 
 Important state:
+
 - `_buffers`
 - `_flushTimers`
 - `_idbDB`
 
 Important constants:
+
 - `FLUSH_INTERVAL_MS = 30000`
 - `FLUSH_ROWS_COUNT = 50`
 - `DB_NAME = 'flowscrape_v3'`
 - `STORE_ROWS = 'data_rows'`
 
 Main exports:
+
 - `initBuffer(runId)`
 - `pushRow(runId, row)`
 - `flush(runId)`
@@ -848,14 +900,17 @@ Main exports:
 Source: [checkpoint/cursor-store.js](../checkpoint/cursor-store.js)
 
 Important state:
+
 - `_db`
 
 Important constants:
+
 - `DB_NAME = 'flowscrape_v3'`
 - `DB_VERSION = 1`
 - `STORE_CURSORS = 'cursors'`
 
 Main exports:
+
 - `saveCursor(cursor)`
 - `loadCursor(runId)`
 - `listCursors()`
@@ -866,6 +921,7 @@ Main exports:
 Source: [checkpoint/resume-manager.js](../checkpoint/resume-manager.js)
 
 Main exports:
+
 - `detectIncompleteRuns()`
 - `markRunCompleted(runId)`
 - `getResumePayload()`
@@ -877,6 +933,7 @@ Main exports:
 Source: [data-sources/csv-parser.js](../data-sources/csv-parser.js)
 
 Main exports:
+
 - `detectDelimiter(sample)`
 - `stripBOM(text)`
 - `parseLine(line, delimiter)`
@@ -888,6 +945,7 @@ Main exports:
 Source: [data-sources/json-parser.js](../data-sources/json-parser.js)
 
 Main exports:
+
 - `parseJSON(text)`
 - `parseJSONL(text)`
 - `streamParseJSON(file, onRows)`
@@ -897,6 +955,7 @@ Main exports:
 Source: [exporters/text-exporters.js](../exporters/text-exporters.js)
 
 Main exports:
+
 - `exportCSV(rows, filename)`
 - `exportJSON(rows, filename)`
 - `exportJSONL(rows, filename)`
@@ -909,9 +968,11 @@ Main exports:
 Source: [exporters/stream-writer.js](../exporters/stream-writer.js)
 
 Important constants:
+
 - `CHUNK_SIZE = 1000`
 
 Main exports:
+
 - `createWriter(filename, mimeType)`
 - `writeRowsChunked(rows, filename, mimeType, formatter)`
 
@@ -922,6 +983,7 @@ Main exports:
 Source: [utils/logger.js](../utils/logger.js)
 
 Important state:
+
 - `LEVELS`
 - `CURRENT_LEVEL`
 - `_buffer`
@@ -932,10 +994,12 @@ Important state:
 Source: [utils/deduplicator.js](../utils/deduplicator.js)
 
 Important state:
+
 - `_seen`
 - `_totalDuplicates`
 
 Main exports:
+
 - `isDuplicate(row, keyColumns)`
 - `reset()`
 - `getStats()`
@@ -946,6 +1010,7 @@ Main exports:
 Source: [utils/levenshtein.js](../utils/levenshtein.js)
 
 Main exports:
+
 - `levenshteinDistance(a, b)`
 - `levenshteinNormalized(a, b)`
 - `tokenize(input)`
@@ -957,6 +1022,7 @@ Main exports:
 Source: [utils/color-utils.js](../utils/color-utils.js)
 
 Main exports:
+
 - `stepColor(stepType)`
 - `fieldColor(fieldIndex, customPalette)`
 - `hexToRGB(hex)`
@@ -973,6 +1039,7 @@ This section explains the major activity types in procedural order.
 ### 16.1 Build and edit
 
 User actions:
+
 - add step
 - delete step
 - insert between steps
@@ -981,6 +1048,7 @@ User actions:
 - expand/collapse details
 
 Internal actions:
+
 - step is mutated in `_pipeline`
 - `saveState()` persists immediately
 - `renderPipeline()` redraws the board
@@ -988,9 +1056,11 @@ Internal actions:
 ### 16.2 Upload pipeline
 
 Expected file:
+
 - JSON object with `steps` array
 
 Workflow:
+
 1. User chooses file.
 2. File is parsed.
 3. Input is normalized.
@@ -1000,12 +1070,14 @@ Workflow:
 ### 16.3 Download pipeline
 
 Output:
+
 - pretty-printed JSON
 - timestamped filename
 
 ### 16.4 Start execution
 
 Inputs sent from side panel:
+
 - `pipeline`
 - `tabId`
 - `targetOrigin`
@@ -1015,6 +1087,7 @@ Inputs sent from side panel:
 - row count / confirmation data when relevant
 
 Execution phases:
+
 1. ethics gates
 2. run state creation
 3. asynchronous execution loop
@@ -1036,6 +1109,7 @@ Execution phases:
 ### 16.7 Export
 
 Can include:
+
 - rows
 - screenshots
 - API-sniffer results
@@ -1136,6 +1210,7 @@ Source: [mcp/server.mjs](../mcp/server.mjs)
 ### 18.1 Purpose
 
 The MCP server exposes the FlowScrape workspace to external clients with:
+
 - file listing
 - file read/write
 - search
@@ -1164,12 +1239,14 @@ The MCP server exposes the FlowScrape workspace to external clients with:
 ### 18.4 MCP tool catalog
 
 Repository tools:
+
 - `repo_list_files`
 - `repo_read_file`
 - `repo_write_file`
 - `repo_search_text`
 
 Pipeline tools:
+
 - `pipeline_compile`
 - `pipeline_validate`
 - `pipeline_serialize`
@@ -1181,11 +1258,13 @@ Pipeline tools:
 - `pipeline_report`
 
 Safety tools:
+
 - `pii_scan_text`
 - `pii_scan_rows`
 - `robots_check`
 
 Formatting tools:
+
 - `rows_to_text`
 
 ### 18.5 MCP request patterns
@@ -1337,6 +1416,7 @@ Typical file format:
 ## 20. Failure Modes and Recovery
 
 Common failure causes:
+
 - no active tab
 - missing pipeline
 - receiving end not available in content runtime
@@ -1346,6 +1426,7 @@ Common failure causes:
 - invalid pipeline JSON upload
 
 Recovery behaviors:
+
 - optional steps are skipped
 - partial data is still retrievable
 - checkpoints persist progress
@@ -1354,6 +1435,7 @@ Recovery behaviors:
 ## 21. Maintenance Rules
 
 If you add a new pipeline step:
+
 1. add it to `STEP_REGISTRY`
 2. add handling in the service worker if orchestration is needed
 3. add handling in the content runtime if DOM work is needed
@@ -1361,11 +1443,13 @@ If you add a new pipeline step:
 5. document it here
 
 If you add a new message:
+
 1. add the constant in the source module
 2. wire sender and receiver
 3. document request and response shapes here
 
 If you add a new MCP tool:
+
 1. register it in `mcp/server.mjs`
 2. validate inputs with zod
 3. document tool input and output here
@@ -1385,12 +1469,14 @@ This master manual is intended to replace the fragmented documentation set so th
 The repository may contain a `bin/` folder for files that are useful during development but are not part of the shipped extension or MCP source tree.
 
 Typical archive candidates:
+
 - `patch-sw.mjs`
 - `patch-export.mjs`
 - `test-emit.mjs`
 - generated dependency trees such as `mcp/node_modules`
 
 Archive policy:
+
 - keep source modules, manifests, docs, and lockfiles in the main tree
 - move temporary patch helpers and throwaway test drivers into `bin/`
 - keep generated dependencies out of the main source tree when they can be recreated with `npm install`

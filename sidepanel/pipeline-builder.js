@@ -405,9 +405,11 @@ function bindGlobalControls() {
 
   const uploadPipelineInput = document.getElementById("input-upload-pipeline");
 
-  document.getElementById("btn-upload-pipeline")?.addEventListener("click", () => {
-    uploadPipelineInput?.click();
-  });
+  document
+    .getElementById("btn-upload-pipeline")
+    ?.addEventListener("click", () => {
+      uploadPipelineInput?.click();
+    });
 
   uploadPipelineInput?.addEventListener("change", async (event) => {
     const file = event.target?.files?.[0];
@@ -911,7 +913,9 @@ function _normalizeImportedStep(step, where, seenIds) {
     throw new Error(`${where} is not a valid step object.`);
   }
 
-  const type = String(step.type || "").trim().toUpperCase();
+  const type = String(step.type || "")
+    .trim()
+    .toUpperCase();
   if (!type) {
     throw new Error(`${where} is missing a step type.`);
   }
