@@ -6,6 +6,8 @@ const MSG = {
   PIPELINE_STOP: "pipeline:stop",
 };
 let SK = { PIPELINE: "fs_active_pipeline" };
+SK.STORAGE_FILES = "fs_storage_files_v1";
+SK.UPLOAD_ACTIVITIES = "fs_upload_activities_v1";
 
 let _tabId = null;
 
@@ -73,6 +75,12 @@ const STEP_REGISTRY = {
     desc: "Drag & Drop",
     def: { source: "", target: "" },
   },
+  UPLOAD_ACTIVITY: {
+    icon: "🛰",
+    cat: "Action",
+    desc: "Upload from Storage",
+    def: { selector: "input[type=file]", fileIds: [], optional: false },
+  },
 
   WAIT: { icon: "⏳", cat: "Flow", desc: "Wait (ms)", def: { ms: 1000 } },
   IF_ELSE: {
@@ -136,6 +144,18 @@ const STEP_REGISTRY = {
       enabled: true,
     },
   },
+  PDF_EXTRACTION: {
+    icon: "📕",
+    cat: "Data",
+    desc: "Extract PDF text",
+    def: {
+      source: "url",
+      url: "",
+      fileId: "",
+      maxPages: 50,
+      storeAs: "pdf_text",
+    },
+  },
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -143,6 +163,9 @@ let _pipeline = { steps: [] };
 let _expandedNodeId = null;
 let _insertCtx = { index: -1, parentId: "", branchKey: "" };
 let _runState = { active: false, timer: null, startTs: 0, runId: null };
+let _storageFiles = [];
+let _uploadActivities = [];
+let _selectedStorageFileIds = new Set();
 let _dragSourceId = null;
 let _keyListening = false;
 let _boardState = {
@@ -190,13 +213,45 @@ async function init() {
 
   bindNavTabs();
   bindGlobalControls();
+  bindStorageControls();
   bindPalette();
   bindDelegatedEvents();
   initBoardSurface();
 
-  const { [SK.PIPELINE]: saved } = await chrome.storage.local.get(SK.PIPELINE);
-  if (saved?.steps) _pipeline = saved;
+  const savedState = await chrome.storage.local.get([
+    SK.PIPELINE,
+    SK.STORAGE_FILES,
+    SK.UPLOAD_ACTIVITIES,
+  ]);
+  if (savedState?.[SK.PIPELINE]?.steps) _pipeline = savedState[SK.PIPELINE];
+
+  _storageFiles = Array.isArray(savedState?.[SK.STORAGE_FILES])
+    ? savedState[SK.STORAGE_FILES]
+    : [];
+
+  _uploadActivities = Array.isArray(savedState?.[SK.UPLOAD_ACTIVITIES])
+    ? savedState[SK.UPLOAD_ACTIVITIES]
+    : [];
+
+  // Running activities cannot survive a sidepanel reload; mark them interrupted.
+  let touchedActivities = false;
+  _uploadActivities = _uploadActivities.map((activity) => {
+    if (activity.status !== "running") return activity;
+    touchedActivities = true;
+    return {
+      ...activity,
+      status: "interrupted",
+      updatedAt: Date.now(),
+      message: "Interrupted (panel reloaded)",
+    };
+  });
+  if (touchedActivities) {
+    await _saveUploadActivities();
+  }
+
   renderPipeline();
+  renderStoragePanel();
+  renderUploadActivities();
   populatePalette();
   listenToSystem();
 
@@ -220,6 +275,331 @@ async function init() {
 
 async function saveState() {
   await chrome.storage.local.set({ [SK.PIPELINE]: _pipeline });
+}
+
+async function _saveStorageFiles() {
+  try {
+    await chrome.storage.local.set({ [SK.STORAGE_FILES]: _storageFiles });
+  } catch (error) {
+    logToMonitor(
+      "error-log",
+      `Storage save failed (quota). Remove large files and retry. ${error?.message || ""}`,
+    );
+    throw error;
+  }
+}
+
+async function _saveUploadActivities() {
+  await chrome.storage.local.set({ [SK.UPLOAD_ACTIVITIES]: _uploadActivities });
+}
+
+function bindStorageControls() {
+  const storageInput = document.getElementById("input-storage-files");
+
+  document
+    .getElementById("btn-storage-add-files")
+    ?.addEventListener("click", () => storageInput?.click());
+
+  storageInput?.addEventListener("change", async (event) => {
+    const files = Array.from(event.target?.files || []);
+    if (!files.length) return;
+    await _stageFilesInStorage(files);
+    event.target.value = "";
+  });
+
+  document
+    .getElementById("btn-storage-clear")
+    ?.addEventListener("click", async () => {
+      _storageFiles = [];
+      _selectedStorageFileIds.clear();
+      await _saveStorageFiles();
+      renderStoragePanel();
+      logToMonitor("info-log", "Storage library cleared.");
+    });
+
+  document
+    .getElementById("btn-upload-setup-select-all")
+    ?.addEventListener("click", () => {
+      _selectedStorageFileIds = new Set(_storageFiles.map((f) => f.id));
+      renderStoragePanel();
+    });
+
+  document
+    .getElementById("btn-upload-setup-clear")
+    ?.addEventListener("click", () => {
+      _selectedStorageFileIds.clear();
+      renderStoragePanel();
+    });
+
+  document.getElementById("btn-upload-start")?.addEventListener("click", () => {
+    _startUploadActivityFromSelection();
+  });
+
+  document
+    .getElementById("upload-file-selector")
+    ?.addEventListener("change", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (!target.classList.contains("upload-file-check")) return;
+
+      const fileId = target.dataset.fileId;
+      if (!fileId) return;
+      if (target.checked) _selectedStorageFileIds.add(fileId);
+      else _selectedStorageFileIds.delete(fileId);
+      renderStoragePanel();
+    });
+
+  document
+    .getElementById("storage-file-list")
+    ?.addEventListener("click", async (event) => {
+      const btn = event.target.closest("[data-action='storage-remove-file']");
+      if (!btn) return;
+      const fileId = btn.dataset.fileId;
+      if (!fileId) return;
+
+      _storageFiles = _storageFiles.filter((f) => f.id !== fileId);
+      _selectedStorageFileIds.delete(fileId);
+      await _saveStorageFiles();
+      renderStoragePanel();
+    });
+}
+
+async function _stageFilesInStorage(files) {
+  const activityId = _createActivity({
+    kind: "storage-stage",
+    fileIds: [],
+    fileNames: files.map((f) => f.name),
+    totalFiles: files.length,
+    message: "Staging files in storage library",
+  });
+
+  const existing = new Set(
+    _storageFiles.map((f) => `${f.name}::${f.size}::${f.lastModified}`),
+  );
+
+  let processed = 0;
+  for (const file of files) {
+    const sig = `${file.name}::${file.size}::${file.lastModified}`;
+    if (!existing.has(sig)) {
+      const dataUrl = await _readFileAsDataUrl(file);
+      const item = {
+        id: `sf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        lastModified: file.lastModified,
+        addedAt: Date.now(),
+        dataUrl,
+      };
+      _storageFiles.unshift(item);
+      existing.add(sig);
+    }
+    processed += 1;
+    _updateActivity(activityId, {
+      processedFiles: processed,
+      progress: Math.round((processed / files.length) * 100),
+      status: "running",
+      message: `Staging ${processed}/${files.length}`,
+    });
+  }
+
+  await _saveStorageFiles();
+  _updateActivity(activityId, {
+    processedFiles: files.length,
+    progress: 100,
+    status: "completed",
+    completedAt: Date.now(),
+    message: "Files staged in storage",
+  });
+
+  renderStoragePanel();
+  renderUploadActivities();
+}
+
+function _startUploadActivityFromSelection() {
+  const selected = _storageFiles.filter((f) =>
+    _selectedStorageFileIds.has(f.id),
+  );
+  if (!selected.length) {
+    logToMonitor(
+      "warn-log",
+      "Select at least one file in Upload Setup before starting.",
+    );
+    return;
+  }
+
+  const activityId = _createActivity({
+    kind: "upload",
+    fileIds: selected.map((f) => f.id),
+    fileNames: selected.map((f) => f.name),
+    totalFiles: selected.length,
+    message: "Upload started",
+  });
+
+  _runUploadActivity(activityId, selected.length);
+}
+
+function _createActivity({ kind, fileIds, fileNames, totalFiles, message }) {
+  const activity = {
+    id: `ua_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    status: "running",
+    fileIds,
+    fileNames,
+    totalFiles,
+    processedFiles: 0,
+    progress: 0,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    completedAt: null,
+    message,
+  };
+  _uploadActivities.unshift(activity);
+  _uploadActivities = _uploadActivities.slice(0, 120);
+  _saveUploadActivities();
+  renderUploadActivities();
+  return activity.id;
+}
+
+function _updateActivity(activityId, patch) {
+  const idx = _uploadActivities.findIndex((a) => a.id === activityId);
+  if (idx === -1) return;
+  _uploadActivities[idx] = {
+    ..._uploadActivities[idx],
+    ...patch,
+    updatedAt: Date.now(),
+  };
+  _saveUploadActivities();
+  renderUploadActivities();
+}
+
+async function _runUploadActivity(activityId, totalFiles) {
+  for (let i = 1; i <= totalFiles; i++) {
+    await _sleep(450);
+    _updateActivity(activityId, {
+      processedFiles: i,
+      progress: Math.round((i / totalFiles) * 100),
+      status: "running",
+      message: `Uploading ${i}/${totalFiles}`,
+    });
+  }
+
+  _updateActivity(activityId, {
+    processedFiles: totalFiles,
+    progress: 100,
+    status: "completed",
+    completedAt: Date.now(),
+    message: "Upload completed",
+  });
+}
+
+function renderStoragePanel() {
+  const listEl = document.getElementById("storage-file-list");
+  const selectorEl = document.getElementById("upload-file-selector");
+  const countEl = document.getElementById("upload-setup-count");
+
+  const validIds = new Set(_storageFiles.map((f) => f.id));
+  _selectedStorageFileIds = new Set(
+    [..._selectedStorageFileIds].filter((id) => validIds.has(id)),
+  );
+
+  if (countEl) countEl.textContent = String(_selectedStorageFileIds.size);
+
+  if (listEl) {
+    if (!_storageFiles.length) {
+      listEl.innerHTML = `<div class="empty-inline">No files in storage yet. Add files to build your reusable library.</div>`;
+    } else {
+      listEl.innerHTML = _storageFiles
+        .map(
+          (file) => `<div class="storage-item">
+          <div class="storage-item-head">
+            <div class="mono" style="font-size:12px;">${esc(file.name)}</div>
+            <button class="btn btn-icon" data-action="storage-remove-file" data-file-id="${file.id}" title="Remove">✕</button>
+          </div>
+          <div class="storage-meta">${esc(file.type || "application/octet-stream")} · ${_formatBytes(file.size)} · Added ${_formatTime(file.addedAt)}</div>
+        </div>`,
+        )
+        .join("");
+    }
+  }
+
+  if (selectorEl) {
+    if (!_storageFiles.length) {
+      selectorEl.innerHTML = `<div class="empty-inline">Upload files to Storage first. They will appear here for pre-selection.</div>`;
+    } else {
+      selectorEl.innerHTML = _storageFiles
+        .map(
+          (
+            file,
+          ) => `<label class="selector-item" style="display:flex; gap:8px; align-items:flex-start;">
+          <input class="upload-file-check" data-file-id="${file.id}" type="checkbox" ${_selectedStorageFileIds.has(file.id) ? "checked" : ""} style="margin-top:3px;" />
+          <div>
+            <div class="mono" style="font-size:12px;">${esc(file.name)}</div>
+            <div class="storage-meta">${esc(file.type || "application/octet-stream")} · ${_formatBytes(file.size)}</div>
+          </div>
+        </label>`,
+        )
+        .join("");
+    }
+  }
+}
+
+function renderUploadActivities() {
+  const targets = [
+    document.getElementById("upload-activity-list"),
+    document.getElementById("upload-activity-list-monitor"),
+  ].filter(Boolean);
+
+  const html = !_uploadActivities.length
+    ? `<div class="empty-inline">No upload activity yet.</div>`
+    : _uploadActivities
+        .map((activity) => {
+          const statusClass =
+            activity.status === "completed"
+              ? "pill pill-completed"
+              : activity.status === "running"
+                ? "pill pill-running"
+                : "pill pill-interrupted";
+          return `<div class="upload-item">
+          <div class="upload-item-head">
+            <div style="font-size:12px;"><b>${activity.kind === "storage-stage" ? "Storage Intake" : "Upload Activity"}</b></div>
+            <span class="${statusClass}">${activity.status}</span>
+          </div>
+          <div class="upload-meta">${activity.message || ""}</div>
+          <div class="upload-meta">Files: ${activity.processedFiles || 0}/${activity.totalFiles || 0} · Progress: ${activity.progress || 0}%</div>
+          <div class="upload-meta">${(activity.fileNames || []).map((n) => esc(n)).join(", ")}</div>
+          <div class="upload-meta">Started ${_formatTime(activity.startedAt)}</div>
+        </div>`;
+        })
+        .join("");
+
+  for (const target of targets) {
+    target.innerHTML = html;
+  }
+}
+
+function _readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () =>
+      reject(new Error(`Failed to read file: ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function _formatBytes(bytes) {
+  const size = Number(bytes || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024)
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function _formatTime(ts) {
+  if (!ts) return "-";
+  return new Date(ts).toLocaleString();
 }
 
 // ── Nav tabs ──────────────────────────────────────────────────────────────────
@@ -1113,6 +1493,11 @@ function getStepSubtitle(step) {
       return `${c.type} mode · max ${c.max}`;
     case "IF_ELSE":
       return `${c.condition}: ${c.selector || "?"}`;
+    case "UPLOAD_ACTIVITY": {
+      const validIds = new Set(_storageFiles.map((f) => f.id));
+      const selected = (c.fileIds || []).filter((id) => validIds.has(id));
+      return `${selected.length} file(s) -> ${c.selector || "input[type=file]"}`;
+    }
     default:
       return STEP_REGISTRY[step.type]?.desc || "";
   }
@@ -1332,6 +1717,45 @@ function generateConfigHtml(step) {
     return html;
   }
 
+  // ── UPLOAD_ACTIVITY ──
+  if (step.type === "UPLOAD_ACTIVITY") {
+    const validIds = new Set(_storageFiles.map((f) => f.id));
+    const selectedIds = Array.isArray(c.fileIds)
+      ? c.fileIds.filter((id) => validIds.has(id))
+      : [];
+
+    html += selectorRow(step, "selector");
+
+    html += `<div class="flex gap-2" style="margin-bottom:8px;">
+      <button class="btn" data-action="upload-step-select-all" data-id="${step.id}">Select All Storage Files</button>
+      <button class="btn" data-action="upload-step-clear" data-id="${step.id}">Clear</button>
+    </div>`;
+
+    html += `<div style="margin-bottom:8px; font-size:12px; color: var(--text-dim);">Selected: <span class="mono">${selectedIds.length}</span></div>`;
+
+    if (!_storageFiles.length) {
+      html += `<div class="empty-inline">No files in Storage library. Add files in the Storage tab first.</div>`;
+    } else {
+      html += `<div class="file-selector-list" style="max-height:160px; margin-bottom:8px;">`;
+      html += _storageFiles
+        .map((file) => {
+          const checked = selectedIds.includes(file.id) ? "checked" : "";
+          return `<label class="selector-item" style="display:flex; gap:8px; align-items:flex-start;">
+            <input class="upload-step-file-check" data-step-id="${step.id}" data-file-id="${file.id}" type="checkbox" ${checked} style="margin-top:3px;" />
+            <div>
+              <div class="mono" style="font-size:12px;">${esc(file.name)}</div>
+              <div class="storage-meta">${esc(file.type || "application/octet-stream")} · ${_formatBytes(file.size)}</div>
+            </div>
+          </label>`;
+        })
+        .join("");
+      html += `</div>`;
+    }
+
+    html += toggle(step, "optional", "optional");
+    return html;
+  }
+
   // ── EXTRACT ──
   if (step.type === "EXTRACT") {
     html += `<div id="extract-fields-${step.id}">`;
@@ -1352,6 +1776,57 @@ function generateConfigHtml(step) {
       <div style="flex:1"><label style="margin-top:0;">Field Name</label><input type="text" id="new-ex-name-${step.id}" placeholder="e.g. price"></div>
       <button class="btn btn-primary" data-action="add-extract-field" data-id="${step.id}" style="height:28px;">🎯 Pick Element</button>
     </div>`;
+    html += toggle(step, "optional", "optional");
+    return html;
+  }
+
+  // ── PDF_EXTRACTION ──
+  if (step.type === "PDF_EXTRACTION") {
+    const source = c.source || "url";
+    html += `<label>Source Type</label>
+    <select id="cfg-${step.id}-source" data-id="${step.id}" data-key="source" data-rerender="true" class="cfg-bind" style="margin-bottom:8px;">
+      <option value="url" ${source === "url" ? "selected" : ""}>PDF URL</option>
+      <option value="file" ${source === "file" ? "selected" : ""}>From Storage</option>
+    </select>`;
+
+    if (source === "url") {
+      html += field(
+        step,
+        "url",
+        "PDF URL",
+        "text",
+        c.url || "https://example.com/document.pdf",
+      );
+    } else {
+      const validIds = new Set(_storageFiles.map((f) => f.id));
+      const selectedId = c.fileId;
+      html += `<label>Select PDF File</label>
+      <select id="cfg-${step.id}-fileId" data-id="${step.id}" data-key="fileId" class="cfg-bind" style="margin-bottom:8px;">
+        <option value="">-- Choose file --</option>`;
+      _storageFiles.forEach((f) => {
+        const selected = selectedId === f.id ? "selected" : "";
+        html += `<option value="${esc(f.id)}" ${selected}>${esc(f.name)}</option>`;
+      });
+      html += `</select>`;
+      if (!_storageFiles.length) {
+        html += `<div class="empty-inline">No files in Storage. Add PDF files in the Storage tab first.</div>`;
+      }
+    }
+
+    html += field(
+      step,
+      "maxPages",
+      "Max pages to extract",
+      "number",
+      c.maxPages ?? 50,
+    );
+    html += field(
+      step,
+      "storeAs",
+      "Store extracted text as",
+      "text",
+      c.storeAs || "pdf_text",
+    );
     html += toggle(step, "optional", "optional");
     return html;
   }
@@ -1593,7 +2068,24 @@ function bindDelegatedEvents() {
       case "register-key":
         _registerKey(id);
         break;
+      case "upload-step-select-all":
+        _uploadStepSelectAll(id);
+        break;
+      case "upload-step-clear":
+        _uploadStepClear(id);
+        break;
     }
+  });
+
+  document.body.addEventListener("change", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (!target.classList.contains("upload-step-file-check")) return;
+
+    const stepId = target.dataset.stepId;
+    const fileId = target.dataset.fileId;
+    if (!stepId || !fileId) return;
+    _uploadStepToggleFile(stepId, fileId, target.checked);
   });
 }
 
@@ -1805,6 +2297,39 @@ function _removeFillField(stepId, idx) {
     saveState();
     renderPipeline();
   }
+}
+
+function _uploadStepSelectAll(stepId) {
+  const step = _findStepDeep(_pipeline.steps, stepId);
+  if (!step) return;
+  step.config.fileIds = _storageFiles.map((f) => f.id);
+  saveState();
+  _rerenderCardConfig(step);
+}
+
+function _uploadStepClear(stepId) {
+  const step = _findStepDeep(_pipeline.steps, stepId);
+  if (!step) return;
+  step.config.fileIds = [];
+  saveState();
+  _rerenderCardConfig(step);
+}
+
+function _uploadStepToggleFile(stepId, fileId, checked) {
+  const step = _findStepDeep(_pipeline.steps, stepId);
+  if (!step) return;
+
+  if (!Array.isArray(step.config.fileIds)) step.config.fileIds = [];
+  const next = new Set(step.config.fileIds);
+  if (checked) next.add(fileId);
+  else next.delete(fileId);
+  step.config.fileIds = [...next];
+
+  saveState();
+  const sub = document.querySelector(
+    `.node-wrapper[data-id="${step.id}"] .node-subtitle`,
+  );
+  if (sub) sub.textContent = getStepSubtitle(step);
 }
 
 // ── Keyboard register ─────────────────────────────────────────────────────────

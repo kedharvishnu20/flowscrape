@@ -9,6 +9,13 @@ This folder contains a standalone Model Context Protocol server for the FlowScra
 - Pipeline storage: save, load, and list reusable pipeline files
 - Safety checks: PII scan and robots.txt check
 - Row formatting: render CSV, JSON, JSONL, TSV, XML, or Markdown
+- PDF scraping: extract text from local or URL PDFs
+
+PDF tool inputs:
+
+- source: local workspace path or HTTP/HTTPS PDF URL
+- fileBase64: uploaded PDF bytes encoded as base64 (or data URL)
+- fileName: optional label for uploaded payloads
 
 ## Install
 

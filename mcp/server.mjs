@@ -8,6 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { z } from "zod";
 
 import {
@@ -35,11 +36,32 @@ const HTTP_PORT = Number(
 );
 const PIPELINES_DIR = path.join(ROOT, "pipelines");
 const httpSessions = new Map();
+const httpSessionServers = new Map();
 
 const server = new McpServer({
   name: "flowscrape-v3",
   version: "3.0.0",
 });
+const toolDefinitions = [];
+const registerTool = server.tool.bind(server);
+
+server.tool = (...args) => {
+  toolDefinitions.push(args);
+  return registerTool(...args);
+};
+
+function createServerInstance() {
+  const instance = new McpServer({
+    name: "flowscrape-v3",
+    version: "3.0.0",
+  });
+
+  for (const [name, description, inputSchema, handler] of toolDefinitions) {
+    instance.tool(name, description, inputSchema, handler);
+  }
+
+  return instance;
+}
 
 const supportedStepTypes = new Set([
   "WEBSITE",
@@ -163,6 +185,51 @@ server.tool(
       include,
       maxResults,
       matches,
+    });
+  },
+);
+
+server.tool(
+  "pdf_extract_text",
+  "Extract text from a PDF file (local path, HTTP/HTTPS URL, or uploaded base64 payload).",
+  {
+    source: z.string().optional(),
+    fileBase64: z.string().optional(),
+    fileName: z.string().optional(),
+    maxPages: z.number().int().min(1).max(1000).optional(),
+    joinPages: z.boolean().optional(),
+  },
+  async ({ source, fileBase64, fileName, maxPages = 50, joinPages = true }) => {
+    const { bytes, resolvedSource } = await readPdfBytes({
+      source,
+      fileBase64,
+      fileName,
+    });
+    const doc = await getDocument({ data: bytes, disableWorker: true }).promise;
+    const pageCount = doc.numPages;
+    const limit = Math.min(pageCount, maxPages);
+
+    const pages = [];
+    for (let pageNo = 1; pageNo <= limit; pageNo++) {
+      const page = await doc.getPage(pageNo);
+      const textContent = await page.getTextContent();
+      const text = textContent.items
+        .map((item) => item?.str ?? "")
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      pages.push({ page: pageNo, text, chars: text.length });
+    }
+
+    return textResult({
+      source: resolvedSource,
+      pageCount,
+      extractedPages: limit,
+      truncated: limit < pageCount,
+      pages,
+      text: joinPages ? pages.map((p) => p.text).join("\n\n") : undefined,
     });
   },
 );
@@ -440,7 +507,8 @@ server.tool(
 
 async function main() {
   if (TRANSPORT_MODE === "stdio" || TRANSPORT_MODE === "both") {
-    await server.connect(new StdioServerTransport());
+    const stdioServer = createServerInstance();
+    await stdioServer.connect(new StdioServerTransport());
   }
 
   if (TRANSPORT_MODE === "http" || TRANSPORT_MODE === "both") {
@@ -564,19 +632,29 @@ async function startHttpServer() {
       if (sessionId && httpSessions.has(sessionId)) {
         transport = httpSessions.get(sessionId);
       } else if (!sessionId && isInitializeRequest(req.body)) {
+        const sessionServer = createServerInstance();
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (nextSessionId) => {
             httpSessions.set(nextSessionId, transport);
+            httpSessionServers.set(nextSessionId, sessionServer);
           },
         });
 
         transport.onclose = () => {
           const nextSessionId = transport.sessionId;
-          if (nextSessionId) httpSessions.delete(nextSessionId);
+          if (!nextSessionId) return;
+
+          httpSessions.delete(nextSessionId);
+
+          const sessionServer = httpSessionServers.get(nextSessionId);
+          if (sessionServer) {
+            httpSessionServers.delete(nextSessionId);
+            sessionServer.close().catch(() => {});
+          }
         };
 
-        await server.connect(transport);
+        await sessionServer.connect(transport);
         await transport.handleRequest(req, res, req.body);
         return;
       } else {
@@ -703,6 +781,65 @@ function parseMaybeJson(value) {
   } catch {
     return null;
   }
+}
+
+async function readPdfBytes({ source, fileBase64, fileName }) {
+  if (fileBase64) {
+    return {
+      bytes: decodeBase64Input(fileBase64),
+      resolvedSource: fileName ? `upload:${fileName}` : "upload:inline",
+    };
+  }
+
+  if (!source) {
+    throw new Error(
+      "Provide either source or fileBase64 for pdf_extract_text.",
+    );
+  }
+
+  if (isHttpUrl(source)) {
+    const response = await fetch(source);
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch PDF: ${response.status} ${response.statusText}`,
+      );
+    }
+    const arr = await response.arrayBuffer();
+    return { bytes: new Uint8Array(arr), resolvedSource: source };
+  }
+
+  const resolved = resolveWorkspacePath(source);
+  const bytes = await fs.readFile(resolved);
+  return {
+    bytes: new Uint8Array(bytes),
+    resolvedSource: toWorkspaceRelative(resolved),
+  };
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function decodeBase64Input(input) {
+  const normalized = String(input).trim();
+  const raw = normalized.startsWith("data:")
+    ? (normalized.split(",", 2)[1] ?? "")
+    : normalized;
+
+  if (!raw) {
+    throw new Error("fileBase64 is empty.");
+  }
+
+  const bytes = Buffer.from(raw, "base64");
+  if (bytes.length === 0) {
+    throw new Error("Invalid fileBase64 payload.");
+  }
+  return new Uint8Array(bytes);
 }
 
 function flattenSteps(steps, output = []) {

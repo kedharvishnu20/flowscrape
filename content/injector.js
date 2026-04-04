@@ -215,6 +215,8 @@ async function _executeStep(step) {
       return _stepKeyboard(config, context);
     case "DRAG_DROP":
       return _stepDragDrop(config, context);
+    case "UPLOAD_ACTIVITY":
+      return _stepUploadActivity(config, context);
     case "LOOP":
       return _stepLoop(config);
     case "IF_ELSE":
@@ -268,6 +270,28 @@ async function _stepNavigate({ url, waitMode = "AUTO" }) {
   return { navigated: false };
 }
 
+// ── Search elements in iframes (for LinkedIn popups, etc.) ─────────────────────
+function _searchInIframes(selector) {
+  const results = [];
+  try {
+    const iframes = document.querySelectorAll("iframe");
+    for (const iframe of iframes) {
+      try {
+        // Check if accessible (same origin)
+        const iframeDoc =
+          iframe.contentDocument || iframe.contentWindow?.document;
+        if (!iframeDoc) continue;
+
+        const found = iframeDoc.querySelectorAll(selector);
+        if (found.length > 0) results.push(...found);
+      } catch (e) {
+        // Cross-origin iframe, skip
+      }
+    }
+  } catch {}
+  return results;
+}
+
 function _pickClickableTarget(el) {
   if (!el) return null;
   const clickableSel = [
@@ -283,10 +307,60 @@ function _pickClickableTarget(el) {
     "[tabindex]",
   ].join(",");
 
+  const ancestor = el.closest?.(clickableSel);
+  if (ancestor) return ancestor;
   if (el.matches?.(clickableSel)) return el;
-  const child = el.querySelector?.(clickableSel);
-  if (child) return child;
   return el;
+}
+
+function _isInteractable(el) {
+  if (!(el instanceof Element)) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return false;
+  if (style.pointerEvents === "none") return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  return true;
+}
+
+function _resolveTopmostAtCenter(el) {
+  if (!(el instanceof Element)) return null;
+  const r = el.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width / 2);
+  const cy = Math.round(r.top + r.height / 2);
+  const stack = document.elementsFromPoint(cx, cy);
+  const related = stack.find(
+    (node) =>
+      node instanceof Element &&
+      node !== _host &&
+      (node === el || node.contains(el) || el.contains(node)),
+  );
+  if (related) return _pickClickableTarget(related) || related;
+  const top = stack.find((node) => node instanceof Element && node !== _host);
+  if (!top) return el;
+  return _pickClickableTarget(top) || top;
+}
+
+function _dispatchKeyboardActivate(el) {
+  if (!(el instanceof HTMLElement)) return;
+  try {
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    el.dispatchEvent(
+      new KeyboardEvent("keyup", {
+        key: "Enter",
+        code: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  } catch {}
 }
 
 function _dispatchSyntheticClick(el) {
@@ -314,6 +388,47 @@ function _dispatchSyntheticClick(el) {
   }
 }
 
+function _isInViewport(el) {
+  if (!(el instanceof Element)) return false;
+  const r = el.getBoundingClientRect();
+  return (
+    r.bottom > 0 &&
+    r.right > 0 &&
+    r.top < window.innerHeight &&
+    r.left < window.innerWidth
+  );
+}
+
+function _pickBestClickMatch(candidates) {
+  const list = Array.from(candidates || []).filter((n) => n instanceof Element);
+  if (!list.length) return null;
+
+  const modalCandidates = Array.from(
+    document.querySelectorAll('[role="dialog"], [aria-modal="true"]'),
+  ).filter((el) => _isInteractable(el));
+  const activeModal = modalCandidates.length
+    ? modalCandidates[modalCandidates.length - 1]
+    : null;
+
+  const score = (el) => {
+    let s = 0;
+    if (_isInteractable(el)) s += 40;
+    if (_isInViewport(el)) s += 20;
+    if (activeModal && activeModal.contains(el)) s += 80;
+
+    const clickable = _pickClickableTarget(el);
+    if (clickable && clickable !== el) s += 10;
+
+    const r = el.getBoundingClientRect();
+    const area = Math.max(1, r.width * r.height);
+    s += Math.min(20, Math.log10(area));
+    return s;
+  };
+
+  list.sort((a, b) => score(b) - score(a));
+  return list[0] || null;
+}
+
 async function _stepClick(
   { selector, retries = 3, all = false },
   context = {},
@@ -322,27 +437,54 @@ async function _stepClick(
   const renderedSelector = _normalizeScopedSelector(selector, context);
   const scopedRoot = _getScopedRoot(context);
   let usedRootFallback = false;
+
+  // Try up to `retries` times with waits in between
   for (let i = 0; i < retries; i++) {
-    els = _queryScoped(selector, context, all);
+    const matches = _queryScoped(selector, context, true);
+    els = all ? matches : [_pickBestClickMatch(matches)].filter(Boolean);
     if (!selector && scopedRoot) els = [scopedRoot];
     if (els.length) break;
-    await _sleep(500);
+    await _sleep(600); // Increased wait time
   }
+
+  // Try searching in iframes as fallback
+  if (!els.length) {
+    const iframeMatches = _searchInIframes(selector);
+    els = all
+      ? iframeMatches
+      : [_pickBestClickMatch(iframeMatches)].filter(Boolean);
+  }
+
   // In LOOP children, if selector still misses, click the current loop item root.
   if (!els.length && scopedRoot && !all) {
     els = [scopedRoot];
     usedRootFallback = true;
   }
+
   if (!els.length) {
-    throw new Error(`Click target not found: ${renderedSelector || selector}`);
+    throw new Error(
+      `❌ Click target not found. Selector: "${renderedSelector || selector}"\n` +
+        `Try: 1) Wait longer before click, 2) Use element picker (🎯), 3) Check if in iframe`,
+    );
   }
+
   let clicked = 0;
   for (const el of els) {
-    const target = _pickClickableTarget(el);
+    let target = _pickClickableTarget(el);
     if (!target) continue;
 
     target.scrollIntoView({ behavior: "smooth", block: "center" });
-    await _sleep(120);
+    await _sleep(180);
+
+    // On modal-heavy apps, center can be covered by transient layers.
+    const topmost = _resolveTopmostAtCenter(target);
+    if (topmost) target = topmost;
+
+    if (!_isInteractable(target)) {
+      await _sleep(220);
+      const retryTopmost = _resolveTopmostAtCenter(target);
+      if (retryTopmost) target = retryTopmost;
+    }
 
     if (target instanceof HTMLElement) target.focus?.({ preventScroll: true });
 
@@ -351,15 +493,34 @@ async function _stepClick(
       ["checkbox", "radio"].includes(target.type?.toLowerCase());
     const wasChecked = isCheck ? target.checked : undefined;
 
-    try {
-      target.click();
-      clicked++;
-    } catch {
-      if (target instanceof HTMLElement) {
-        _dispatchSyntheticClick(target);
-        clicked++;
+    const primary = _pickClickableTarget(target) || target;
+    const centerResolved = _resolveTopmostAtCenter(primary) || primary;
+    const candidates = [primary, centerResolved].filter(
+      (node, idx, arr) => node && arr.indexOf(node) === idx,
+    );
+
+    let fired = false;
+    for (const candidate of candidates) {
+      if (!_isInteractable(candidate)) continue;
+      try {
+        candidate.click();
+        fired = true;
+      } catch {}
+
+      if (!fired && candidate instanceof HTMLElement) {
+        _dispatchSyntheticClick(candidate);
+        fired = true;
       }
+
+      if (!fired && candidate instanceof HTMLElement) {
+        _dispatchKeyboardActivate(candidate);
+        fired = true;
+      }
+
+      if (fired) break;
     }
+
+    if (fired) clicked++;
 
     // Some pages block native click on hidden radio/checkbox wrappers.
     if (isCheck && target.checked === wasChecked) {
@@ -501,6 +662,240 @@ async function _stepScreenshot({ fullPage = false }) {
   // Screenshots require SW coordination via chrome.tabs.captureVisibleTab
   // Signal back to SW to capture
   return { screenshotRequested: true, fullPage };
+}
+
+async function _stepUploadActivity(
+  { selector = "", files = [] },
+  context = {},
+) {
+  const _isFileInput = (node) =>
+    node instanceof HTMLInputElement && node.type === "file";
+
+  const _sameDialogRank = (candidate, anchor) => {
+    const candidateDialog = candidate.closest?.(
+      '[role="dialog"], [aria-modal="true"]',
+    );
+    const anchorDialog = anchor?.closest?.(
+      '[role="dialog"], [aria-modal="true"]',
+    );
+    return candidateDialog && anchorDialog && candidateDialog === anchorDialog;
+  };
+
+  const _visibleish = (el) => {
+    if (!(el instanceof HTMLElement)) return false;
+    const style = getComputedStyle(el);
+    return style.display !== "none" && style.visibility !== "hidden";
+  };
+
+  const _rankFileInputs = (inputs, anchor) => {
+    const list = Array.from(inputs || []);
+    list.sort((a, b) => {
+      const aSame = _sameDialogRank(a, anchor) ? 1 : 0;
+      const bSame = _sameDialogRank(b, anchor) ? 1 : 0;
+      if (aSame !== bSame) return bSame - aSame;
+      const aVisible = _visibleish(a) ? 1 : 0;
+      const bVisible = _visibleish(b) ? 1 : 0;
+      if (aVisible !== bVisible) return bVisible - aVisible;
+      return 0;
+    });
+    return list;
+  };
+
+  const _deepQueryAll = (root, selector) => {
+    const results = [];
+    const seen = new Set();
+
+    const visit = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+
+      try {
+        if (node.querySelectorAll) {
+          results.push(...node.querySelectorAll(selector));
+        }
+      } catch {}
+
+      const treeWalker = document.createTreeWalker(
+        node,
+        NodeFilter.SHOW_ELEMENT,
+      );
+      let current = treeWalker.currentNode;
+      while (current) {
+        const shadow = current.shadowRoot;
+        if (shadow) visit(shadow);
+        current = treeWalker.nextNode();
+      }
+    };
+
+    visit(root);
+    return results;
+  };
+
+  const _findPopupTrigger = (anchor) => {
+    if (!(anchor instanceof Element)) return null;
+    const scope =
+      anchor.closest?.('[role="dialog"], [aria-modal="true"]') ||
+      anchor.parentElement ||
+      anchor;
+    const triggerSelectors = [
+      'button[aria-label*="Add media"]',
+      'button[aria-label*="Media"]',
+      'button[aria-label*="upload"]',
+      'button[aria-label*="Upload"]',
+      '[role="button"][aria-label*="Add media"]',
+      '[role="button"][aria-label*="Upload"]',
+      "button.share-promoted-detour-button",
+      'button[title*="media"]',
+      'button[title*="upload"]',
+    ];
+
+    for (const sel of triggerSelectors) {
+      const found = scope.querySelector?.(sel) || anchor.querySelector?.(sel);
+      if (found instanceof HTMLElement) return found;
+    }
+
+    const nearbyButtons = Array.from(
+      scope.querySelectorAll?.("button,[role='button']") || [],
+    );
+    return (
+      nearbyButtons.find((el) => {
+        const label =
+          `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""} ${el.textContent || ""}`.toLowerCase();
+        return (
+          label.includes("media") ||
+          label.includes("upload") ||
+          label.includes("add")
+        );
+      }) || null
+    );
+  };
+
+  const _findUploadInput = async () => {
+    const anchor = _queryScoped(selector, context, false)[0] || null;
+    if (!anchor) return null;
+
+    if (_isFileInput(anchor)) return anchor;
+
+    const fromAnchor = anchor.querySelector?.('input[type="file"]');
+    if (_isFileInput(fromAnchor)) return fromAnchor;
+
+    const scopedModal = anchor.closest?.(
+      '[role="dialog"], [aria-modal="true"]',
+    );
+    const fromModal = scopedModal?.querySelector?.('input[type="file"]');
+    if (_isFileInput(fromModal)) return fromModal;
+
+    const deepFromAnchor = _deepQueryAll(anchor, 'input[type="file"]').find(
+      _isFileInput,
+    );
+    if (deepFromAnchor) return deepFromAnchor;
+
+    const deepFromModal = scopedModal
+      ? _deepQueryAll(scopedModal, 'input[type="file"]').find(_isFileInput)
+      : null;
+    if (deepFromModal) return deepFromModal;
+
+    // If the picker landed on a trigger button/container, click once to reveal the hidden input.
+    if (anchor instanceof HTMLElement) {
+      const trigger = _findPopupTrigger(anchor);
+      if (trigger && trigger !== anchor) {
+        try {
+          trigger.click();
+        } catch {
+          _dispatchSyntheticClick(trigger);
+        }
+        await _sleep(700);
+      }
+
+      try {
+        anchor.click();
+      } catch {
+        _dispatchSyntheticClick(anchor);
+      }
+      await _sleep(700);
+    }
+
+    const afterClickFromAnchor = anchor.querySelector?.('input[type="file"]');
+    if (_isFileInput(afterClickFromAnchor)) return afterClickFromAnchor;
+
+    const deepAfterClickFromAnchor = _deepQueryAll(
+      anchor,
+      'input[type="file"]',
+    ).find(_isFileInput);
+    if (deepAfterClickFromAnchor) return deepAfterClickFromAnchor;
+
+    const afterClickFromModal =
+      scopedModal?.querySelector?.('input[type="file"]');
+    if (_isFileInput(afterClickFromModal)) return afterClickFromModal;
+
+    const deepAfterClickFromModal = scopedModal
+      ? _deepQueryAll(scopedModal, 'input[type="file"]').find(_isFileInput)
+      : null;
+    if (deepAfterClickFromModal) return deepAfterClickFromModal;
+
+    const afterClickTrigger = _findPopupTrigger(anchor);
+    if (afterClickTrigger && afterClickTrigger !== anchor) {
+      try {
+        afterClickTrigger.click();
+      } catch {
+        _dispatchSyntheticClick(afterClickTrigger);
+      }
+      await _sleep(700);
+      const modalAfterTrigger =
+        scopedModal?.querySelector?.('input[type="file"]');
+      if (_isFileInput(modalAfterTrigger)) return modalAfterTrigger;
+      const deepModalAfterTrigger = scopedModal
+        ? _deepQueryAll(scopedModal, 'input[type="file"]').find(_isFileInput)
+        : null;
+      if (deepModalAfterTrigger) return deepModalAfterTrigger;
+      const anchorAfterTrigger = anchor.querySelector?.('input[type="file"]');
+      if (_isFileInput(anchorAfterTrigger)) return anchorAfterTrigger;
+      const deepAnchorAfterTrigger = _deepQueryAll(
+        anchor,
+        'input[type="file"]',
+      ).find(_isFileInput);
+      if (deepAnchorAfterTrigger) return deepAnchorAfterTrigger;
+    }
+
+    const allInputs = _rankFileInputs(
+      _deepQueryAll(document, 'input[type="file"]'),
+      anchor,
+    );
+    return allInputs[0] || null;
+  };
+
+  const input = await _findUploadInput();
+  if (!input) throw new Error(`Upload input not found near: ${selector}`);
+  if (!_isFileInput(input)) {
+    throw new Error(`Target is not input[type=file]: ${selector}`);
+  }
+
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error("UPLOAD_ACTIVITY has no files to upload.");
+  }
+
+  const dt = new DataTransfer();
+  for (const item of files) {
+    const dataUrl = String(item?.dataUrl || "");
+    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) {
+      throw new Error(`Invalid file payload for ${item?.name || "unknown"}`);
+    }
+    const mime = match[1] || "application/octet-stream";
+    const bytes = Uint8Array.from(atob(match[2]), (c) => c.charCodeAt(0));
+    const file = new File([bytes], item?.name || "upload.bin", { type: mime });
+    dt.items.add(file);
+  }
+
+  input.files = dt.files;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+
+  return {
+    uploaded: dt.files.length,
+    selector,
+    fileNames: Array.from(dt.files).map((f) => f.name),
+  };
 }
 
 // ── FILL (was TYPE): single or multi-field input ─────────────────────────────
@@ -796,6 +1191,36 @@ function _findCommonClass(elements) {
   );
   return common[0] || "";
 }
+
+function _buildNthPath(node, maxDepth = 8) {
+  if (!node || node.nodeType !== Node.ELEMENT_NODE) return "*";
+  const parts = [];
+  let current = node;
+  let depth = 0;
+
+  while (current && depth < maxDepth && current !== document.documentElement) {
+    const tag = current.tagName.toLowerCase();
+    if (current.id) {
+      parts.unshift(`#${CSS.escape(current.id)}`);
+      break;
+    }
+    const parent = current.parentElement;
+    if (!parent) {
+      parts.unshift(tag);
+      break;
+    }
+    const sameType = Array.from(parent.children).filter(
+      (c) => c.tagName.toLowerCase() === tag,
+    );
+    const idx = sameType.indexOf(current) + 1;
+    parts.unshift(idx > 0 ? `${tag}:nth-of-type(${idx})` : tag);
+    current = parent;
+    depth++;
+  }
+
+  return parts.join(" > ") || node.tagName.toLowerCase();
+}
+
 function _buildSpecificSelector(el) {
   if (el.id) return `#${CSS.escape(el.id)}`;
   const tag = el.tagName.toLowerCase();
@@ -803,13 +1228,8 @@ function _buildSpecificSelector(el) {
     .filter((c) => !c.match(/^(active|selected|hover|open|show)/))
     .slice(0, 2);
   if (cls.length) return `${tag}.${cls.map((c) => CSS.escape(c)).join(".")}`;
-  // nth-child fallback
-  const parent = el.parentElement;
-  if (parent) {
-    const idx = Array.from(parent.children).indexOf(el) + 1;
-    return `${_buildSpecificSelector(parent)} > ${tag}:nth-child(${idx})`;
-  }
-  return tag;
+  // Never return a bare tag; use structural path fallback.
+  return _buildNthPath(el);
 }
 
 // ── Selector picker overlay ────────────────────────────────────────────────────
@@ -829,7 +1249,7 @@ async function _activateSelectorPicker(payload) {
     const overlay = document.createElement("div");
     overlay.style.cssText = [
       "position:fixed;top:0;left:0;width:100%;height:100%;",
-      "z-index:2147483645;cursor:crosshair;background:transparent;pointer-events:auto;",
+      "z-index:2147483645;cursor:crosshair;background:transparent;pointer-events:none;",
     ].join("");
     _shadow.appendChild(overlay);
 
@@ -844,30 +1264,61 @@ async function _activateSelectorPicker(payload) {
     const tooltip = document.createElement("div");
     tooltip.style.cssText =
       "position:absolute;bottom:-24px;left:-2px;background:#2563eb;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;white-space:nowrap;font-family:sans-serif;pointer-events:none;";
-    tooltip.textContent = "Hold CTRL to allow hover";
+    tooltip.textContent = "Click to pick element";
     highlight.appendChild(tooltip);
 
     _shadow.appendChild(highlight);
 
     document.addEventListener("mousemove", onMove, true); // Capture phase!
     document.addEventListener("click", onClick, true);
-    document.addEventListener("keydown", onKey, true);
-    document.addEventListener("keyup", onKey, true);
-
-    function onKey(e) {
-      // "Optional" interaction enabler via CTRL
-      if (e.key === "Control") {
-        overlay.style.pointerEvents = e.type === "keydown" ? "none" : "auto";
-      }
-    }
 
     let _blockTimer = null;
     let _lastX = 0,
       _lastY = 0;
 
+    function _isIgnoredPickerTarget(el) {
+      if (!el || el === _host || el === overlay || el === highlight)
+        return true;
+      if (el === document.documentElement || el === document.body) return true;
+      return false;
+    }
+
+    function _pickRealTargetAtPoint(x, y) {
+      const prevDisplay = _host.style.display;
+      _host.style.display = "none";
+      const stack = document.elementsFromPoint(x, y);
+      _host.style.display = prevDisplay;
+
+      const base = stack.find((node) => !_isIgnoredPickerTarget(node)) || null;
+      if (!base) return null;
+
+      const clickable = base.closest?.(
+        "button,a,input,textarea,select,[role='button'],[contenteditable='true'],[aria-label]",
+      );
+      return clickable && !_isIgnoredPickerTarget(clickable) ? clickable : base;
+    }
+
+    function _pickTargetFromEvent(e) {
+      const path = Array.isArray(e?.composedPath?.()) ? e.composedPath() : [];
+      const base =
+        path.find(
+          (node) =>
+            node &&
+            node.nodeType === Node.ELEMENT_NODE &&
+            !_isIgnoredPickerTarget(node),
+        ) || null;
+      if (!base) return null;
+
+      const clickable = base.closest?.(
+        "button,a,input,textarea,select,[role='button'],[contenteditable='true'],[aria-label]",
+      );
+      return clickable && !_isIgnoredPickerTarget(clickable) ? clickable : base;
+    }
+
     function _updateHighlight() {
       if (!currentTarget) return;
       const rect = currentTarget.getBoundingClientRect();
+
       Object.assign(highlight.style, {
         top: `${rect.top}px`,
         left: `${rect.left}px`,
@@ -881,18 +1332,10 @@ async function _activateSelectorPicker(payload) {
       _lastY = e.clientY;
       if (!_blockTimer) {
         _blockTimer = requestAnimationFrame(() => {
-          overlay.style.pointerEvents = "none";
-          const realTarget = document.elementFromPoint(_lastX, _lastY);
-          // Restore pointer-events: CTRL held = keep 'none' to let user interact
-          overlay.style.pointerEvents = e.ctrlKey ? "none" : "auto";
+          const realTarget =
+            _pickTargetFromEvent(e) || _pickRealTargetAtPoint(_lastX, _lastY);
           _blockTimer = null;
-          if (
-            !realTarget ||
-            realTarget === _host ||
-            realTarget.nodeName === "HTML" ||
-            realTarget === document.documentElement
-          )
-            return;
+          if (!realTarget) return;
           currentTarget = realTarget;
           _updateHighlight();
         });
@@ -902,10 +1345,15 @@ async function _activateSelectorPicker(payload) {
     function onClick(e) {
       e.preventDefault();
       e.stopPropagation();
+
+      // Resolve again at click time so we don't keep a stale container target.
+      currentTarget =
+        _pickTargetFromEvent(e) ||
+        _pickRealTargetAtPoint(e.clientX, e.clientY) ||
+        currentTarget;
+
       document.removeEventListener("mousemove", onMove, true);
       document.removeEventListener("click", onClick, true);
-      document.removeEventListener("keydown", onKey, true);
-      document.removeEventListener("keyup", onKey, true);
 
       _shadow.removeChild(overlay);
       _shadow.removeChild(highlight);
@@ -931,81 +1379,132 @@ function _buildSelector(el, bulk = false) {
     if (res && res.selector !== "*") return res.selector;
   }
 
-  // 1. Try Unique ID (ONLY if not doing universal bulk extraction)
-  if (!bulk && el.id) {
-    const cleanId = CSS.escape(el.id);
-    try {
-      if (document.querySelectorAll(`#${cleanId}`).length === 1)
-        return `#${cleanId}`;
-    } catch {}
-  }
-
-  // 2. Try Semantic Attributes
   const semantics = [
     "data-testid",
     "data-test",
+    "data-view-name",
     "data-id",
     "name",
     "aria-label",
     "placeholder",
     "role",
+    "type",
+    "title",
+    "alt",
   ];
-  for (const attr of semantics) {
-    const val = el.getAttribute(attr);
-    if (val) {
-      const sel = `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(val)}"]`;
-      try {
-        if (!bulk && document.querySelectorAll(sel).length === 1) return sel;
-        if (bulk && document.querySelectorAll(sel).length > 1) return sel;
-      } catch {}
-    }
-  }
 
-  // 3. Try Classes
-  if (el.className && typeof el.className === "string") {
-    const classes = el.className
-      .split(/\s+/)
-      .filter(
-        (c) =>
-          c &&
-          !c.includes("hover") &&
-          !c.includes("active") &&
-          !c.includes("focus") &&
-          !c.includes("ng-"),
-      );
+  const isLikelyStableClass = (c) => {
+    if (!c) return false;
+    if (/^(active|selected|hover|focus|open|show|disabled)$/i.test(c))
+      return false;
+    if (/^ng-|^css-|^jsx-|^sc-/.test(c)) return false;
+    if (/\d{4,}/.test(c)) return false;
+    if (/^(x|y|z|sm|md|lg|xl)$/i.test(c)) return false;
+    return true;
+  };
+
+  const qCount = (sel) => {
+    try {
+      return document.querySelectorAll(sel).length;
+    } catch {
+      return 0;
+    }
+  };
+
+  const nthOfType = (node) => {
+    const tag = node.tagName.toLowerCase();
+    const parent = node.parentElement;
+    if (!parent) return tag;
+    const siblings = Array.from(parent.children).filter(
+      (c) => c.tagName.toLowerCase() === tag,
+    );
+    const idx = siblings.indexOf(node) + 1;
+    return idx > 0 ? `${tag}:nth-of-type(${idx})` : tag;
+  };
+
+  const unique = (sel) => qCount(sel) === 1;
+
+  const buildNodeCandidates = (node) => {
+    const tag = node.tagName.toLowerCase();
+    const out = [];
+
+    if (node.id) {
+      const idSel = `#${CSS.escape(node.id)}`;
+      out.push(idSel);
+      out.push(`${tag}${idSel}`);
+    }
+
+    for (const attr of semantics) {
+      const val = node.getAttribute?.(attr);
+      if (!val || String(val).length > 120) continue;
+      out.push(`${tag}[${attr}="${CSS.escape(String(val))}"]`);
+    }
+
+    const classes = Array.from(node.classList || []).filter(
+      isLikelyStableClass,
+    );
     if (classes.length > 0) {
-      const classSel =
-        el.tagName.toLowerCase() +
-        "." +
-        classes.map((c) => CSS.escape(c)).join(".");
-      try {
-        if (!bulk && document.querySelectorAll(classSel).length === 1)
-          return classSel;
-        if (bulk) return classSel; // Perfect universal anchor!
-      } catch {}
+      out.push(`${tag}.${CSS.escape(classes[0])}`);
+      if (classes.length > 1) {
+        out.push(`${tag}.${CSS.escape(classes[0])}.${CSS.escape(classes[1])}`);
+      }
+      if (classes.length > 2) {
+        out.push(
+          `${tag}.${CSS.escape(classes[0])}.${CSS.escape(classes[1])}.${CSS.escape(classes[2])}`,
+        );
+      }
     }
+
+    out.push(nthOfType(node));
+    out.push(tag);
+
+    // De-duplicate while preserving score order
+    return Array.from(new Set(out));
+  };
+
+  // 1) Try direct unique selector for the target element.
+  const selfCandidates = buildNodeCandidates(el);
+  const isTagOnly = (sel) => sel === el.tagName.toLowerCase();
+  for (const sel of selfCandidates) {
+    if (isTagOnly(sel)) continue;
+    if (unique(sel)) return sel;
   }
 
-  // 4. Fallback to structural path
-  const tag = el.tagName.toLowerCase();
-  const parent = el.parentElement;
-  if (parent) {
-    if (bulk && tag !== "svg") {
-      // Universal generic path logic across parent containers
-      return `${_buildSelector(parent, bulk)} > ${tag}`;
-    } else {
-      // Specific locked path for non-bulk target
-      const siblings = Array.from(parent.children).filter(
-        (c) => c.tagName.toLowerCase() === tag,
-      );
-      if (siblings.length === 1) {
-        return `${_buildSelector(parent, bulk)} > ${tag}`;
-      }
-      const idx = siblings.indexOf(el) + 1;
-      return `${_buildSelector(parent, bulk)} > ${tag}:nth-of-type(${idx})`;
+  // 2) Build anchored path upward until unique.
+  let current = el;
+  let depth = 0;
+  let parts = [];
+  let bestSelector =
+    selfCandidates.find((s) => !isTagOnly(s)) || _buildNthPath(el);
+  let bestCount = qCount(bestSelector) || Number.POSITIVE_INFINITY;
+
+  while (current && depth < 8 && current !== document.documentElement) {
+    const candidates = buildNodeCandidates(current);
+    const part =
+      candidates.find((s) => s.startsWith("#")) ||
+      candidates.find((s) => s.includes("[")) ||
+      candidates.find((s) => s.includes(".")) ||
+      candidates.find((s) => s.includes(":nth-of-type(")) ||
+      current.tagName.toLowerCase();
+
+    parts.unshift(part);
+    const chain = parts.join(" > ");
+    const count = qCount(chain);
+    if (count === 1) return chain;
+    if (count > 0 && count < bestCount) {
+      bestCount = count;
+      bestSelector = chain;
     }
+
+    current = current.parentElement;
+    depth++;
   }
-  return tag;
+
+  // 3) Return best non-unique candidate; if it degrades, force structural path.
+  if (bestSelector === el.tagName.toLowerCase()) {
+    return _buildNthPath(el);
+  }
+  return bestSelector;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

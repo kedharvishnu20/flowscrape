@@ -48,6 +48,19 @@ import { emitPython } from "../script-gen/python-emitter.js";
 import { emitNode } from "../script-gen/node-emitter.js";
 
 const MODULE = "service-worker";
+const STORAGE_FILES_KEY = "fs_storage_files_v1";
+
+// ── Restricted sites that block automated file uploads ────────────────────────
+const RESTRICTED_UPLOAD_SITES = Object.freeze({
+  "linkedin.com": true,
+  "www.linkedin.com": true,
+  "facebook.com": true,
+  "www.facebook.com": true,
+  "twitter.com": true,
+  "x.com": true,
+  "instagram.com": true,
+  "www.instagram.com": true,
+});
 
 // ── Utility helpers ────────────────────────────────────────────────────────────
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -238,13 +251,18 @@ async function _captureScreenshot(tabId, config = {}, runId) {
   const runState = _runStates.get(runId);
   if (!runState) return;
   try {
+    const rawQuality = Number(config.quality);
+    const quality = Number.isFinite(rawQuality)
+      ? Math.max(0, Math.min(100, Math.round(rawQuality)))
+      : 100;
+
     // Focus the tab so captureVisibleTab can see it
     await chrome.tabs.update(tabId, { active: true });
     await _sleep(400);
     const tab = await chrome.tabs.get(tabId);
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
       format: "png",
-      quality: config.quality || 100,
+      quality,
     });
     // Store in memory for ZIP export
     if (!Array.isArray(runState.screenshots)) runState.screenshots = [];
@@ -257,6 +275,55 @@ async function _captureScreenshot(tabId, config = {}, runId) {
   } catch (err) {
     throw new Error(`Screenshot failed: ${err.message}`);
   }
+}
+
+async function _executePdfExtraction(config = {}, runId) {
+  const source = String(config.source || "url").trim();
+  const maxPages = Number(config.maxPages) || 50;
+  const storeAs = String(config.storeAs || "pdf_text").trim() || "pdf_text";
+
+  let fileBase64;
+  let fileUrl;
+
+  if (source === "file") {
+    // Load from storage files
+    const fileId = String(config.fileId || "").trim();
+    const stored = await chrome.storage.local.get(STORAGE_FILES_KEY);
+    const library = Array.isArray(stored?.[STORAGE_FILES_KEY])
+      ? stored[STORAGE_FILES_KEY]
+      : [];
+    const file = library.find((f) => f.id === fileId);
+    if (!file) {
+      throw new Error(`PDF file not found in storage: ${fileId}`);
+    }
+    fileBase64 = file.dataUrl;
+  } else {
+    // Use URL
+    fileUrl = String(config.url || "").trim();
+    if (!fileUrl) {
+      throw new Error("PDF_EXTRACTION requires a PDF URL or file selection");
+    }
+  }
+
+  // Call MCP pdf_extract_text tool via sendMessage to a background context
+  // We use chrome.runtime.sendMessage to notify any listening context
+  // In practice, this would be handled by an external MCP call or built-in PDF parser
+
+  // For now, return a placeholder that says to use the MCP tool
+  _broadcastLog(
+    "warning-log",
+    `PDF_EXTRACTION: Use MCP tool "pdf_extract_text" with source="${source}" to extract from PDF.`,
+    runId,
+  );
+
+  return {
+    [storeAs]: {
+      status: "pending",
+      message: "Use MCP pdf_extract_text tool for extraction",
+      source,
+      maxPages,
+    },
+  };
 }
 
 // ── Minimal pure-JS ZIP creator (store, no compression) ───────────────────────
@@ -658,6 +725,84 @@ async function _executeApiStep(config = {}, ctx = {}) {
   }
 }
 
+async function _executeUploadActivityStep(config = {}, tabId, runId = null) {
+  const tabData = await chrome.tabs.get(tabId);
+  const tabUrl = tabData?.url || "";
+  const domain = new URL(tabUrl).hostname;
+
+  const stored = await chrome.storage.local.get(STORAGE_FILES_KEY);
+  const library = Array.isArray(stored?.[STORAGE_FILES_KEY])
+    ? stored[STORAGE_FILES_KEY]
+    : [];
+
+  const selector = String(config.selector || "").trim();
+  if (!selector) {
+    throw new Error("UPLOAD_ACTIVITY requires a file input selector.");
+  }
+
+  const wantedIds = Array.isArray(config.fileIds) ? config.fileIds : [];
+  const selected = wantedIds.length
+    ? library.filter((f) => wantedIds.includes(f.id))
+    : library;
+
+  if (!selected.length) {
+    throw new Error(
+      "UPLOAD_ACTIVITY has no files selected. Add files in Storage and select them in step config.",
+    );
+  }
+
+  if (!tabId) {
+    throw new Error("No target tab for UPLOAD_ACTIVITY.");
+  }
+
+  // Warn if restricted site - use MCP tool instead
+  if (RESTRICTED_UPLOAD_SITES[domain]) {
+    _broadcastLog(
+      "warning-log",
+      `⚠️ ${domain} blocks script-driven uploads. Use MCP tool "upload_file_to_site" for automation support.`,
+      runId,
+    );
+  }
+
+  _broadcastLog(
+    "info-log",
+    `Upload Activity: uploading ${selected.length} file(s) to ${selector}`,
+    runId,
+  );
+
+  const resp = await chrome.tabs
+    .sendMessage(tabId, {
+      type: "step:execute",
+      payload: {
+        type: "UPLOAD_ACTIVITY",
+        config: {
+          selector,
+          files: selected.map((file) => ({
+            name: file.name,
+            type: file.type || "application/octet-stream",
+            dataUrl: file.dataUrl,
+          })),
+        },
+      },
+    })
+    .catch((err) => ({ ok: false, error: err?.message }));
+
+  if (!resp?.ok) {
+    throw new Error(resp?.error || "Upload failed in page context.");
+  }
+
+  _broadcastLog(
+    "info-log",
+    `Upload Activity complete: ${selected.length} file(s) staged in target input.`,
+    runId,
+  );
+
+  return {
+    uploaded: selected.length,
+    fileNames: selected.map((f) => f.name),
+  };
+}
+
 async function _executeLoop(step, tabId, runId, parentCtx = {}) {
   const {
     type: ltype = "count",
@@ -829,6 +974,17 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       );
     } else if (resolvedStep.type === "API_SNIFFER") {
       await _sleep(50);
+    } else if (resolvedStep.type === "PDF_EXTRACTION") {
+      const pdfResult = await _executePdfExtraction(resolvedStep.config, runId);
+      const storeAs = Object.keys(pdfResult)[0] || "pdf_text";
+      liveCtx[storeAs] = pdfResult[storeAs];
+      _broadcastLog(
+        "info-log",
+        `PDF extraction queued: use MCP tool to extract text from PDF.`,
+        runId,
+      );
+    } else if (resolvedStep.type === "UPLOAD_ACTIVITY") {
+      await _executeUploadActivityStep(resolvedStep.config, tabId, runId);
     } else if (resolvedStep.type === "EXPORT") {
       await finalizeBuffer(runId).catch(() => {});
       initBuffer(runId);
@@ -925,6 +1081,12 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         await _doExport(runId, resolvedStep.config);
       } else if (resolvedStep.type === "API_SNIFFER") {
         await _sleep(50);
+      } else if (resolvedStep.type === "UPLOAD_ACTIVITY") {
+        await _executeUploadActivityStep(
+          resolvedStep.config,
+          targetTabId,
+          runId,
+        );
       } else if (resolvedStep.type === "LOOP") {
         await _executeLoop(resolvedStep, targetTabId, runId, runtimeCtx);
       } else if (resolvedStep.type === "IF_ELSE") {
@@ -996,6 +1158,13 @@ _registerHandler(MSG.STEP_EXECUTE, async (payload, sender) => {
 
   if (resolvedStep.type === "API") {
     return _executeApiStep(resolvedStep.config, testCtx);
+  }
+
+  if (resolvedStep.type === "UPLOAD_ACTIVITY") {
+    if (!targetTabId) {
+      throw new Error("No target tab specified for UPLOAD_ACTIVITY test");
+    }
+    return _executeUploadActivityStep(resolvedStep.config, targetTabId, null);
   }
 
   if (!targetTabId)
