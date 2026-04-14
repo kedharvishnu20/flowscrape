@@ -46,6 +46,7 @@ import { getResumePayload } from "../checkpoint/resume-manager.js";
 import { compilePipeline } from "../script-gen/pipeline-compiler.js";
 import { emitPython } from "../script-gen/python-emitter.js";
 import { emitNode } from "../script-gen/node-emitter.js";
+import { runLlmLayer } from "./llm-extractor.js";
 
 const MODULE = "service-worker";
 const STORAGE_FILES_KEY = "fs_storage_files_v1";
@@ -323,6 +324,126 @@ async function _executePdfExtraction(config = {}, runId) {
       source,
       maxPages,
     },
+  };
+}
+
+// ── AUTO_EXTRACT orchestrator ──────────────────────────────────────────────────
+/**
+ * Runs the full cascading extraction pipeline for a single page:
+ *   1. Triggers smart-extractor.js (Layers 1 & 2) inside the tab.
+ *   2. If confidence is too low and a Gemini key is present, runs Layer 3 LLM.
+ *   3. Merges results, returns a single product row.
+ *
+ * @param {object} config   - Step config ({ confidenceThreshold, extractType })
+ * @param {number} tabId    - Target Chrome tab ID
+ * @param {string} runId    - Pipeline run identifier
+ * @param {object} ctx      - Runtime context for template resolution
+ * @returns {Promise<object>} - Product row with _confidence and _method meta fields
+ */
+async function _executeAutoExtract(config = {}, tabId, runId, ctx = {}) {
+  const threshold = Number(config.confidenceThreshold ?? 70);
+
+  // ── Layer 1 & 2: run in-page smart-extractor ──────────────────────────────
+  const l12Resp = await chrome.tabs.sendMessage(tabId, {
+    type: "step:execute",
+    payload: { type: "AUTO_EXTRACT", config: { confidenceThreshold: threshold } },
+  }).catch(err => ({ ok: false, error: err.message }));
+
+  if (!l12Resp?.ok) {
+    throw new Error(`AUTO_EXTRACT (L1/L2) failed: ${l12Resp?.error || "No response"}`);
+  }
+
+  let extraction = l12Resp.result;
+
+  // ── Layer 3: LLM fallback if confidence is still low ──────────────────────
+  if (extraction.needsLlm && extraction.simplifiedDom) {
+    _broadcastLog(
+      "info-log",
+      `AUTO_EXTRACT: L1/L2 confidence ${extraction.overallConfidence}% — escalating to LLM...`,
+      runId,
+    );
+    const llmResult = await runLlmLayer(extraction.simplifiedDom).catch(() => null);
+    if (llmResult) {
+      // LLM wins field-by-field where it has higher confidence
+      extraction = _mergeLlmOverL12(extraction, llmResult);
+      _broadcastLog(
+        "info-log",
+        `AUTO_EXTRACT: LLM merged — overall confidence now ${extraction.overallConfidence}%.`,
+        runId,
+      );
+    } else {
+      _broadcastLog(
+        "warn-log",
+        `AUTO_EXTRACT: LLM layer skipped or failed — using L1/L2 result (confidence: ${extraction.overallConfidence}%).`,
+        runId,
+      );
+    }
+  } else if (!extraction.needsLlm) {
+    _broadcastLog(
+      "info-log",
+      `AUTO_EXTRACT: finished via ${extraction.method} (confidence: ${extraction.overallConfidence}%).`,
+      runId,
+    );
+  }
+
+  // Emit per-field warnings to pipeline log
+  for (const warning of (extraction.warnings || [])) {
+    _broadcastLog("warn-log", warning, runId);
+  }
+
+  // Build the final row — include confidence metadata as hidden fields
+  const row = {
+    ...extraction.result,
+    _confidence:       extraction.overallConfidence,
+    _extractionMethod: extraction.method,
+  };
+
+  return row;
+}
+
+/**
+ * Field-level merge: for each field, pick whichever source (L1/L2 or LLM)
+ * has higher per-field confidence.
+ */
+function _mergeLlmOverL12(l12, llm) {
+  const fieldList = ["name", "price", "originalPrice", "currency", "brand",
+    "description", "sku", "availability", "rating", "reviewCount", "images"];
+
+  const mergedResult   = { ...(l12.result   || {}) };
+  const mergedPerField = { ...(l12.perField  || {}) };
+  const mergedWarnings = [...(l12.warnings   || []), ...(llm.warnings || [])];
+
+  for (const field of fieldList) {
+    const l12Conf = l12.perField?.[field]  ?? 0;
+    const llmConf = llm.perField?.[field]  ?? 0;
+    const llmVal  = llm.result?.[field];
+
+    const isEmpty = v => v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
+
+    // LLM wins if: it has a value AND either L1/L2 is empty OR LLM has higher confidence
+    if (!isEmpty(llmVal) && (isEmpty(mergedResult[field]) || llmConf > l12Conf)) {
+      mergedResult[field]   = llmVal;
+      mergedPerField[field] = llmConf;
+    }
+  }
+
+  // Recompute overall confidence after merge
+  const weights = { name: 30, price: 25, images: 15, brand: 10, description: 10, sku: 5, availability: 5 };
+  let totalWeight = 0, weightedSum = 0;
+  for (const [field, weight] of Object.entries(weights)) {
+    totalWeight += weight;
+    weightedSum += (mergedPerField[field] || 0) * weight;
+  }
+  const overallConfidence = Math.round(weightedSum / totalWeight);
+
+  return {
+    result:            mergedResult,
+    perField:          mergedPerField,
+    overallConfidence,
+    method:            llm.method || l12.method,
+    warnings:          mergedWarnings,
+    needsLlm:          false,
+    simplifiedDom:     "",
   };
 }
 
@@ -985,6 +1106,16 @@ async function _executeStepList(steps, tabId, runId, ctx = {}) {
       );
     } else if (resolvedStep.type === "UPLOAD_ACTIVITY") {
       await _executeUploadActivityStep(resolvedStep.config, tabId, runId);
+    } else if (resolvedStep.type === "AUTO_EXTRACT") {
+      const row = await _executeAutoExtract(resolvedStep.config, tabId, runId, liveCtx);
+      runState.results.push(row);
+      await pushRow(runId, row);
+      Object.assign(liveCtx.extracted, row);
+      _broadcastLog(
+        "info-log",
+        `AUTO_EXTRACT: product row saved (confidence: ${row._confidence}%).`,
+        runId,
+      );
     } else if (resolvedStep.type === "EXPORT") {
       await finalizeBuffer(runId).catch(() => {});
       initBuffer(runId);
@@ -1085,6 +1216,16 @@ async function _executePipeline(runId, pipeline, targetTabId) {
         await _executeUploadActivityStep(
           resolvedStep.config,
           targetTabId,
+          runId,
+        );
+      } else if (resolvedStep.type === "AUTO_EXTRACT") {
+        const row = await _executeAutoExtract(resolvedStep.config, targetTabId, runId, runtimeCtx);
+        runState.results.push(row);
+        await pushRow(runId, row);
+        Object.assign(runtimeCtx.extracted, row);
+        _broadcastLog(
+          "info-log",
+          `AUTO_EXTRACT: product row saved (confidence: ${row._confidence}%).`,
           runId,
         );
       } else if (resolvedStep.type === "LOOP") {

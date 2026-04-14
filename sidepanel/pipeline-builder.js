@@ -156,6 +156,16 @@ const STEP_REGISTRY = {
       storeAs: "pdf_text",
     },
   },
+  AUTO_EXTRACT: {
+    icon: "🤖",
+    cat: "Data",
+    desc: "Smart product auto-extract",
+    def: {
+      confidenceThreshold: 70,
+      extractType: "product",
+      useLlm: true,
+    },
+  },
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -735,6 +745,20 @@ function bindGlobalControls() {
       logToMonitor(
         res?.ok ? "info-log" : "error-log",
         res?.ok ? "OpenAI key saved." : "Failed to save OpenAI key.",
+      );
+    });
+  document
+    .getElementById("btn-save-key-gemini")
+    ?.addEventListener("click", async () => {
+      const val = document.getElementById("key-gemini").value.trim();
+      if (!val) return;
+      const res = await chrome.runtime.sendMessage({
+        type: "key:set",
+        payload: { provider: "gemini", value: val },
+      });
+      logToMonitor(
+        res?.ok ? "info-log" : "error-log",
+        res?.ok ? "Gemini key saved." : "Failed to save Gemini key.",
       );
     });
   document
@@ -1498,6 +1522,8 @@ function getStepSubtitle(step) {
       const selected = (c.fileIds || []).filter((id) => validIds.has(id));
       return `${selected.length} file(s) -> ${c.selector || "input[type=file]"}`;
     }
+    case "AUTO_EXTRACT":
+      return `🤖 AI Extract • conf≥${c.confidenceThreshold ?? 70}%`;
     default:
       return STEP_REGISTRY[step.type]?.desc || "";
   }
@@ -1827,6 +1853,50 @@ function generateConfigHtml(step) {
       "text",
       c.storeAs || "pdf_text",
     );
+    html += toggle(step, "optional", "optional");
+    return html;
+  }
+
+  // ── AUTO_EXTRACT ──
+  if (step.type === "AUTO_EXTRACT") {
+    html += `<div style="background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.35);border-radius:8px;padding:12px;margin-bottom:12px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-size:20px;">🤖</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;">Smart Product Auto-Extractor</div>
+          <div style="font-size:11px;color:var(--text-dim);">Layers 1 &amp; 2 run instantly in-page (no API). Layer 3 uses Gemini AI if confidence is low.</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px;color:var(--text-dim);">
+        <div>✅ JSON-LD / Schema.org</div>
+        <div>✅ Open Graph tags</div>
+        <div>✅ Heuristic DOM scorer</div>
+        <div>✅ Gemini Flash fallback</div>
+      </div>
+    </div>`;
+
+    html += `<label>Extract Type</label>
+    <select id="cfg-${step.id}-extractType" data-id="${step.id}" data-key="extractType" class="cfg-bind" style="margin-bottom:8px;">
+      <option value="product" ${(c.extractType || "product") === "product" ? "selected" : ""}>🛍️ Product Page</option>
+      <option value="article" ${c.extractType === "article" ? "selected" : ""}>📰 Article / Blog Post</option>
+      <option value="listing" ${c.extractType === "listing" ? "selected" : ""}>📋 Product Listing / Grid</option>
+    </select>`;
+
+    html += field(
+      step,
+      "confidenceThreshold",
+      "Min. confidence to accept (0–100)",
+      "number",
+      c.confidenceThreshold ?? 70,
+    );
+
+    html += toggle(step, "useLlm", "Enable AI fallback (Gemini) when confidence is low");
+
+    html += `<div style="margin-top:10px;padding:8px 10px;border-radius:6px;background:rgba(99,102,241,0.1);font-size:11px;color:var(--text-dim);">
+      <b>Extracted fields:</b> name, price, originalPrice, currency, brand, description, sku, availability, rating, reviewCount, images[]<br>
+      <b>Tip:</b> Use this step inside a LOOP to extract products from multiple pages automatically.
+    </div>`;
+
     html += toggle(step, "optional", "optional");
     return html;
   }

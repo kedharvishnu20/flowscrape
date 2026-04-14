@@ -193,6 +193,7 @@ export async function validateApiKey(provider) {
     'capsolver':   () => _validateCapsolver(key),
     'hunter':      () => _validateHunter(key),
     'openai':      () => _validateOpenAI(key),
+    'gemini':      () => _validateGemini(key),
   };
 
   const fn = validators[provider.toLowerCase()];
@@ -263,6 +264,20 @@ async function _validateOpenAI(key) {
     headers: { Authorization: `Bearer ${key}` },
   });
   if (res.status === 401) return { valid: false, error: 'Invalid API key' };
+  if (!res.ok) return { valid: false, error: `HTTP ${res.status}` };
+  return { valid: true };
+}
+
+async function _validateGemini(key) {
+  // Use the Gemini models list endpoint — lightweight validation call.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=1`;
+  const res = await _timedFetch(url);
+  if (res.status === 400) {
+    const json = await res.json().catch(() => ({}));
+    const msg = json?.error?.message || 'Invalid API key';
+    return { valid: false, error: msg };
+  }
+  if (res.status === 403 || res.status === 401) return { valid: false, error: 'Invalid or unauthorized Gemini API key' };
   if (!res.ok) return { valid: false, error: `HTTP ${res.status}` };
   return { valid: true };
 }

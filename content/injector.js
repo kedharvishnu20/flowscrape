@@ -201,6 +201,8 @@ async function _executeStep(step) {
       return _stepWait(config, context);
     case "EXTRACT":
       return _stepExtract(config, context);
+    case "AUTO_EXTRACT":
+      return _stepAutoExtract(config);
     case "SCREENSHOT":
       return _stepScreenshot(config);
     case "FILL":
@@ -260,6 +262,40 @@ async function _executeStep(step) {
     default:
       throw new Error(`Unknown step type: ${type}`);
   }
+}
+
+/**
+ * AUTO_EXTRACT step handler.
+ * Delegates to window.__fsSmartExtract which is exposed by smart-extractor.js.
+ * That function runs Layers 1 (structured data) and 2 (heuristic DOM) locally,
+ * then returns the result including a `simplifiedDom` string if the SW should
+ * escalate to the LLM layer.
+ *
+ * @param {object} config - { confidenceThreshold?: number }
+ * @returns {Promise<object>} Extraction result
+ */
+async function _stepAutoExtract(config = {}) {
+  // Guard: smart-extractor.js injects __fsSmartExtract onto window.
+  // If the script hasn't loaded yet (rare race on instant navigation), wait briefly.
+  let retries = 0;
+  while (typeof window.__fsSmartExtract !== "function" && retries < 5) {
+    await _sleep(200);
+    retries++;
+  }
+
+  if (typeof window.__fsSmartExtract !== "function") {
+    throw new Error(
+      "AUTO_EXTRACT: smart-extractor.js not loaded — ensure it is registered " +
+      "in manifest.json before injector.js."
+    );
+  }
+
+  // Run synchronously — pure DOM reads, no awaits needed inside
+  const result = window.__fsSmartExtract({
+    confidenceThreshold: config.confidenceThreshold ?? 70,
+  });
+
+  return result;
 }
 
 async function _stepNavigate({ url, waitMode = "AUTO" }) {
@@ -1141,8 +1177,10 @@ function _buildBulkSelector(el) {
       const sigClass = _findCommonClass(sameTagSiblings);
       if (sigClass) {
         part += `.${CSS.escape(sigClass)}`;
+        foundBulkSequence = true;
+      } else if (['li', 'tr', 'td', 'article', 'section'].includes(part)) {
+        foundBulkSequence = true;
       }
-      foundBulkSequence = true;
     } else {
       // Try to add stable classes
       if (current.className && typeof current.className === "string") {
@@ -1181,7 +1219,7 @@ function _buildBulkSelector(el) {
 
 function _findCommonClass(elements) {
   if (!elements.length) return "";
-  const classSets = elements.map((el) => Array.from(el.classList));
+  const classSets = elements.map((el) => Array.from(el.classList || []));
   // Find classes present in ALL elements
   const common = classSets[0].filter(
     (cls) =>
@@ -1224,7 +1262,7 @@ function _buildNthPath(node, maxDepth = 8) {
 function _buildSpecificSelector(el) {
   if (el.id) return `#${CSS.escape(el.id)}`;
   const tag = el.tagName.toLowerCase();
-  const cls = Array.from(el.classList)
+  const cls = Array.from(el.classList || [])
     .filter((c) => !c.match(/^(active|selected|hover|open|show)/))
     .slice(0, 2);
   if (cls.length) return `${tag}.${cls.map((c) => CSS.escape(c)).join(".")}`;
@@ -1249,7 +1287,7 @@ async function _activateSelectorPicker(payload) {
     const overlay = document.createElement("div");
     overlay.style.cssText = [
       "position:fixed;top:0;left:0;width:100%;height:100%;",
-      "z-index:2147483645;cursor:crosshair;background:transparent;pointer-events:none;",
+      "z-index:2147483645;cursor:crosshair;background:transparent;",
     ].join("");
     _shadow.appendChild(overlay);
 
